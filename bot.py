@@ -54,7 +54,7 @@ TRACKED_CHANNELS: Dict[int, str] = {
 SUMMARY_CHANNEL_ID = 1473454134689796146  # #bettingtracker
 
 PREFIX = "bt!"
-DB_PATH = "bets.db"
+DB_PATH = "/var/data/bets.db"
 
 # Calendar timezone for reporting/autopost
 REPORT_TZ = "America/New_York"  # ET
@@ -830,3 +830,4 @@ async def autopost_loop():
 
 
 bot.run(TOKEN)
+

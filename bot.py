@@ -1,5 +1,6 @@
 import csv
 import io
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -19,25 +20,32 @@ except Exception:
 """
 bot.py
 
-Discord betting tracker (channel-based cappers) with:
-- Odds support: flat units, multiplier (3x), American odds (+250/-120), "1u to win 4u"
-- Result support: Win/Loss/Push
-- Storage: SQLite (bets.db)
-- Reporting: Daily/Weekly/Monthly/Yearly/All-time (calendar-based in ET)
-- Filters: by sport, by capper
-- VIP combined totals + charts
-- Export: CSV
+Discord betting tracker with:
+- Channel-based cappers
+- Pending bet detection from natural play posts (e.g. "1U ... (-115)")
+- Grading via capper reactions only:
+    ✅ win, ❌ loss, 🟡 push
+- Bot confirmation reaction:
+    📌 means "logged"
+- Regrade workflow:
+    capper removes 📌 -> bet is unlogged and restored to pending
+- SQLite storage (persistent disk recommended: /var/data/bets.db)
+- Summaries + charts + CSV export
 - Auto-post at 10:00 AM ET for previous day/week/month/year
 """
 
 # =====================
-# CONFIG (EDIT TOKEN ONLY)
+# CONFIG
 # =====================
 
-import os
 TOKEN = os.getenv("TOKEN")
+PREFIX = "bt!"
+DB_PATH = "/var/data/bets.db"
 
-# Private capper channels (channel_id -> capper_name)
+REPORT_TZ = "America/New_York"  # ET
+
+SUMMARY_CHANNEL_ID = 1473454134689796146  # #bettingtracker
+
 TRACKED_CHANNELS: Dict[int, str] = {
     1257081246509563944: "PropKitchen",
     1258244563726893106: "hotshot",
@@ -50,21 +58,47 @@ TRACKED_CHANNELS: Dict[int, str] = {
     1424256774692667422: "betsbybray",
 }
 
-# Where auto-post summaries go
-SUMMARY_CHANNEL_ID = 1473454134689796146  # #bettingtracker
+# Channel ID -> Capper User ID (ONLY this user can grade in that channel)
+CAPPER_OWNERS: Dict[int, int] = {
+    1257081246509563944: 1230980936657535061,  # PropKitchen
+    1356017581558857796: 1242294328253218878,  # Matt Locks
+    1344526479366688808: 1345160333261668362,  # Balls Out
+    1430746272192659569: 1430751846125010970,  # Mike Locks
+    1258244563726893106: 475659527337934849,   # Hotshot
+    1409640332295147570: 1109269360037601411,  # Gr8
+    1278486906169987226: 933024893992329286,   # PXS
+    1424256774692667422: 865284268745949194,   # Bray
+    1281388388569579608: 684940092665757696,   # Clipset
+}
 
-PREFIX = "bt!"
-DB_PATH = "/var/data/bets.db"
+# Emoji grading + confirmation
+EMOJI_WIN = "✅"
+EMOJI_LOSS = "❌"
+EMOJI_PUSH = "🟡"
+EMOJI_LOGGED = "📌"
+EMOJI_PENDING = "📝"
 
-# Calendar timezone for reporting/autopost
-REPORT_TZ = "America/New_York"  # ET
+REACT_ON_PENDING = True  # adds 📝 when a pending bet is detected
 
-# Auto-post schedule (ET)
 AUTOPOST_ENABLED = True
 AUTOPOST_HOUR_ET = 10
 AUTOPOST_MINUTE_ET = 0
-WEEKLY_POST_WEEKDAY = 0  # Monday (0=Mon ... 6=Sun)
-MONTHLY_POST_DAY = 1     # 1st day of month
+WEEKLY_POST_WEEKDAY = 0
+MONTHLY_POST_DAY = 1
+
+# Optional: default sport per channel (if you want clean "SOCCER" etc)
+# If empty, the bot tries to detect sport from message text; if none, uses "UNSPECIFIED".
+DEFAULT_SPORT_BY_CHANNEL: Dict[int, str] = {
+    # 1257081246509563944: "NBA",
+}
+
+AUTO_DETECT_SPORTS = [
+    "NBA", "NCAAB", "NFL", "NCAAF", "MLB", "NHL",
+    "TENNIS", "ESPORTS", "UFC",
+    "SOCCER", "EPL", "MLS", "UCL", "LA LIGA", "SERIE A", "BUNDESLIGA",
+]
+
+IGNORE_TEST_BETS = True  # if message contains "test", don't store anything
 
 
 # =====================
@@ -73,11 +107,17 @@ MONTHLY_POST_DAY = 1     # 1st day of month
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+intents.reactions = True
+
+bot = commands.Bot(
+    command_prefix=PREFIX,
+    intents=intents,
+    partials=(discord.PartialMessage, discord.PartialMessageable, discord.PartialEmoji),
+)
 
 
 # =====================
-# DATABASE
+# DB SETUP
 # =====================
 
 conn = sqlite3.connect(DB_PATH)
@@ -87,6 +127,8 @@ cursor.execute(
     """
     CREATE TABLE IF NOT EXISTS bets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER,
+        channel_id INTEGER,
         capper TEXT NOT NULL,
         sport TEXT NOT NULL,
         risk_units REAL NOT NULL,
@@ -97,19 +139,45 @@ cursor.execute(
     )
     """
 )
+
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS pending_bets (
+        message_id INTEGER PRIMARY KEY,
+        channel_id INTEGER NOT NULL,
+        capper TEXT NOT NULL,
+        sport TEXT NOT NULL,
+        risk_units REAL NOT NULL,
+        odds_text TEXT NOT NULL,
+        timestamp_utc TEXT NOT NULL
+    )
+    """
+)
+
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_bets_time ON bets(timestamp_utc)")
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_bets_capper_time ON bets(capper, timestamp_utc)")
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_bets_sport_time ON bets(sport, timestamp_utc)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_bets_message ON bets(message_id)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_channel ON pending_bets(channel_id)")
 conn.commit()
 
 
 def _ensure_schema() -> None:
     cols = cursor.execute("PRAGMA table_info(bets)").fetchall()
     colnames = {c[1].lower() for c in cols}
+
+    # Backward-compat rename (if needed)
     if "timestamp" in colnames and "timestamp_utc" not in colnames:
         cursor.execute("ALTER TABLE bets RENAME COLUMN timestamp TO timestamp_utc")
-    if "timestamp_utc" not in colnames:
-        cursor.execute("ALTER TABLE bets ADD COLUMN timestamp_utc TEXT")
+
+    # Add missing columns if an older table exists
+    for col, ddl in [
+        ("message_id", "ALTER TABLE bets ADD COLUMN message_id INTEGER"),
+        ("channel_id", "ALTER TABLE bets ADD COLUMN channel_id INTEGER"),
+    ]:
+        if col not in colnames:
+            cursor.execute(ddl)
+
     conn.commit()
 
 
@@ -170,13 +238,6 @@ def parse_year(s: str) -> Optional[int]:
 
 
 def period_bounds_local(period: str, ref: Optional[date] = None) -> Tuple[datetime, datetime]:
-    """
-    Calendar periods in ET:
-    - daily: ref day 00:00 -> next day 00:00
-    - weekly: Mon 00:00 -> next Mon 00:00 (week containing ref)
-    - monthly: 1st 00:00 -> next month 1st 00:00
-    - yearly: Jan 1 00:00 -> next Jan 1 00:00
-    """
     period = period.lower()
     ref = ref or now_local().date()
 
@@ -207,7 +268,7 @@ def period_bounds_local(period: str, ref: Optional[date] = None) -> Tuple[dateti
 
 
 # =====================
-# PARSING + MATH
+# PARSING
 # =====================
 
 @dataclass(frozen=True)
@@ -219,12 +280,23 @@ class ParsedBet:
     odds_text: str
 
 
-_RE_UNITS = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*u\s*$", re.IGNORECASE)
-_RE_TO_WIN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*u\s*to\s*win\s*(\d+(?:\.\d+)?)\s*u\s*$", re.IGNORECASE)
+# Supports "1u", "0.5u", ".5u"
+_RE_UNITS = re.compile(r"^\s*((?:\d+(?:\.\d+)?|\.\d+))\s*u\s*$", re.IGNORECASE)
+_RE_TO_WIN = re.compile(
+    r"^\s*((?:\d+(?:\.\d+)?|\.\d+))\s*u\s*to\s*win\s*((?:\d+(?:\.\d+)?|\.\d+))\s*u\s*$",
+    re.IGNORECASE,
+)
 
-# Odds can be "Odds: +250" OR "+250", same for "3x"
 _RE_AMERICAN = re.compile(r"^\s*(?:odds\s*:\s*)?([+-]\d+)\s*$", re.IGNORECASE)
 _RE_MULT = re.compile(r"^\s*(?:odds\s*:\s*)?(\d+(?:\.\d+)?)\s*x\s*$", re.IGNORECASE)
+
+# Natural post patterns:
+# - "1U ..." or ".5U ..." anywhere
+_RE_ANY_UNITS = re.compile(r"(?i)(^|\s)(\d+(?:\.\d+)?|\.\d+)\s*u\b")
+# - "(-115)" or "+120" or "-110" or "3.15x"
+_RE_ANY_AMERICAN_PARENS = re.compile(r"\(\s*([+-]\d+)\s*\)")
+_RE_ANY_AMERICAN = re.compile(r"(^|\s)([+-]\d+)(\s|$)")
+_RE_ANY_MULT = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*x\b")
 
 
 def _profit_from_american(risk: float, american: int) -> float:
@@ -234,22 +306,10 @@ def _profit_from_american(risk: float, american: int) -> float:
 
 
 def _profit_from_multiplier(risk: float, mult: float) -> float:
-    # "3x" means total return 3*risk => profit = (3-1)*risk
     return risk * (mult - 1.0)
 
 
-def parse_bet_message(content: str) -> Optional[ParsedBet]:
-    """
-    Required structure:
-      Bet: ... | <stake> | <sport> | <optional odds> | Result: Win/Loss/Push
-
-    Examples:
-      Bet: Lakers -3.5 | 1u | NBA | Result: Win
-      Bet: Parlay | 1u | NBA | 3x | Result: Win
-      Bet: ML | 1u | TENNIS | -140 | Result: Win
-      Bet: Dog | 1u | ESPORTS | +250 | Result: Win
-      Bet: Parlay | 1u to win 4u | NCAAB | Result: Win
-    """
+def parse_strict_bet_message(content: str) -> Optional[ParsedBet]:
     low = content.lower()
     if "bet:" not in low or "result:" not in low:
         return None
@@ -270,7 +330,6 @@ def parse_bet_message(content: str) -> Optional[ParsedBet]:
     if result not in {"win", "loss", "push"}:
         return None
 
-    # "1u to win 4u"
     m_to_win = _RE_TO_WIN.match(stake_part)
     if m_to_win:
         risk = float(m_to_win.group(1))
@@ -280,7 +339,6 @@ def parse_bet_message(content: str) -> Optional[ParsedBet]:
         net = to_win if result == "win" else (-risk if result == "loss" else 0.0)
         return ParsedBet(sport=sport, risk_units=risk, net_units=net, result=result, odds_text=f"to_win:{to_win}")
 
-    # "1u"
     m_units = _RE_UNITS.match(stake_part)
     if not m_units:
         return None
@@ -288,12 +346,10 @@ def parse_bet_message(content: str) -> Optional[ParsedBet]:
     if risk <= 0:
         return None
 
-    # Default: flat (+risk on win, -risk on loss)
     odds_text = ""
     win_profit = risk
     loss_profit = -risk
 
-    # Optional odds slot: only if message has 5+ parts
     odds_part = parts[3] if len(parts) >= 5 else ""
     if odds_part:
         m_am = _RE_AMERICAN.match(odds_part)
@@ -315,29 +371,146 @@ def parse_bet_message(content: str) -> Optional[ParsedBet]:
     return ParsedBet(sport=sport, risk_units=risk, net_units=net, result=result, odds_text=odds_text)
 
 
+def detect_sport(channel_id: int, content: str) -> str:
+    if channel_id in DEFAULT_SPORT_BY_CHANNEL:
+        return DEFAULT_SPORT_BY_CHANNEL[channel_id]
+    upper = content.upper()
+    for s in AUTO_DETECT_SPORTS:
+        if s.upper() in upper:
+            return s
+    return "UNSPECIFIED"
+
+
+def detect_units(content: str) -> Optional[float]:
+    m = _RE_ANY_UNITS.search(content)
+    if not m:
+        return None
+    try:
+        return float(m.group(2))
+    except Exception:
+        return None
+
+
+def detect_odds_text(content: str) -> str:
+    m = _RE_ANY_AMERICAN_PARENS.search(content)
+    if m:
+        return m.group(1).strip()
+
+    m = _RE_ANY_MULT.search(content)
+    if m:
+        return f"{m.group(1)}x"
+
+    m = _RE_ANY_AMERICAN.search(content)
+    if m:
+        return m.group(2).strip()
+
+    return ""
+
+
+def compute_net_units(risk: float, odds_text: str, result: str) -> float:
+    result = result.lower()
+    if result == "push":
+        return 0.0
+
+    win_profit = risk
+    if odds_text:
+        am = _RE_AMERICAN.match(odds_text)
+        if am:
+            win_profit = _profit_from_american(risk, int(am.group(1)))
+        else:
+            mult = _RE_MULT.match(odds_text)
+            if mult:
+                win_profit = _profit_from_multiplier(risk, float(mult.group(1)))
+
+    if result == "win":
+        return win_profit
+    return -risk  # loss
+
+
 # =====================
-# QUERIES / REPORTING
+# STORAGE HELPERS
 # =====================
 
-def list_cappers() -> List[str]:
-    return sorted(set(TRACKED_CHANNELS.values()), key=lambda s: s.lower())
-
-
-def capper_match(name: str) -> Optional[str]:
-    return next((c for c in list_cappers() if c.lower() == name.lower()), None)
-
-
-def list_sports() -> List[str]:
-    rows = cursor.execute(
+def upsert_pending(message_id: int, channel_id: int, capper: str, sport: str, risk: float, odds_text: str, ts_utc: str) -> None:
+    cursor.execute(
         """
-        SELECT DISTINCT sport
+        INSERT INTO pending_bets (message_id, channel_id, capper, sport, risk_units, odds_text, timestamp_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+            channel_id=excluded.channel_id,
+            capper=excluded.capper,
+            sport=excluded.sport,
+            risk_units=excluded.risk_units,
+            odds_text=excluded.odds_text,
+            timestamp_utc=excluded.timestamp_utc
+        """,
+        (message_id, channel_id, capper, sport, risk, odds_text, ts_utc),
+    )
+    conn.commit()
+
+
+def fetch_pending(message_id: int) -> Optional[Tuple[int, int, str, str, float, str, str]]:
+    row = cursor.execute(
+        """
+        SELECT message_id, channel_id, capper, sport, risk_units, odds_text, timestamp_utc
+        FROM pending_bets
+        WHERE message_id=?
+        """,
+        (message_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return int(row[0]), int(row[1]), str(row[2]), str(row[3]), float(row[4]), str(row[5]), str(row[6])
+
+
+def delete_pending(message_id: int) -> None:
+    cursor.execute("DELETE FROM pending_bets WHERE message_id=?", (message_id,))
+    conn.commit()
+
+
+def insert_graded_bet(
+    message_id: int,
+    channel_id: int,
+    capper: str,
+    sport: str,
+    risk: float,
+    odds_text: str,
+    result: str,
+    net: float,
+    ts_utc: str,
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO bets (message_id, channel_id, capper, sport, risk_units, net_units, result, odds_text, timestamp_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (message_id, channel_id, capper, sport, risk, net, result, odds_text, ts_utc),
+    )
+    conn.commit()
+
+
+def delete_graded_bet(message_id: int) -> Optional[Tuple[int, int, str, str, float, str, str]]:
+    row = cursor.execute(
+        """
+        SELECT message_id, channel_id, capper, sport, risk_units, odds_text, timestamp_utc
         FROM bets
-        WHERE sport IS NOT NULL AND TRIM(sport) <> ''
-        ORDER BY LOWER(sport) ASC
-        """
-    ).fetchall()
-    return [str(r[0]) for r in rows]
+        WHERE message_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (message_id,),
+    ).fetchone()
+    if not row:
+        return None
 
+    cursor.execute("DELETE FROM bets WHERE message_id=?", (message_id,))
+    conn.commit()
+    return int(row[0]), int(row[1]), str(row[2]), str(row[3]), float(row[4]), str(row[5]), str(row[6])
+
+
+# =====================
+# REPORTING (same as before)
+# =====================
 
 def fetch_capper_rows(
     start_utc: datetime,
@@ -429,10 +602,6 @@ def make_rows_text(rows: List[Tuple[str, float, int, int, int]]) -> str:
     return "\n".join(lines)
 
 
-# =====================
-# CHARTS
-# =====================
-
 def generate_units_chart(title: str, rows: List[Tuple[str, float, int, int, int]]) -> io.BytesIO:
     labels = [r[0] for r in rows]
     values = [r[1] for r in rows]
@@ -468,10 +637,6 @@ def generate_vip_combined_chart(title: str, vip_net: float, rows: List[Tuple[str
     buf.seek(0)
     return buf
 
-
-# =====================
-# EXPORT
-# =====================
 
 def export_bets_csv(
     start_utc: datetime,
@@ -510,10 +675,6 @@ def export_bets_csv(
     buf.seek(0)
     return buf
 
-
-# =====================
-# POST HELPERS
-# =====================
 
 async def post_period_summary(
     channel: discord.abc.Messageable,
@@ -565,42 +726,174 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Ignore TEST bets (do not store in DB)
-    if "test" in message.content.lower():
-        await message.channel.send("🧪 Test bet detected — not counted.")
+    content = message.content or ""
+    if IGNORE_TEST_BETS and "test" in content.lower():
         await bot.process_commands(message)
         return
 
-    # Only log bets from tracked capper channels
     if message.channel.id not in TRACKED_CHANNELS:
         await bot.process_commands(message)
         return
 
-    parsed = parse_bet_message(message.content)
-    if not parsed:
+    capper = TRACKED_CHANNELS[message.channel.id]
+    ts_utc = utc_iso(message.created_at.replace(tzinfo=timezone.utc))
+
+    # 1) Keep strict format logging (optional)
+    strict = parse_strict_bet_message(content)
+    if strict:
+        cursor.execute(
+            """
+            INSERT INTO bets (message_id, channel_id, capper, sport, risk_units, net_units, result, odds_text, timestamp_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message.id,
+                message.channel.id,
+                capper,
+                strict.sport,
+                strict.risk_units,
+                strict.net_units,
+                strict.result,
+                strict.odds_text,
+                ts_utc,
+            ),
+        )
+        conn.commit()
+        try:
+            await message.add_reaction(EMOJI_LOGGED)
+        except Exception:
+            pass
         await bot.process_commands(message)
         return
 
-    capper = TRACKED_CHANNELS[message.channel.id]
-    cursor.execute(
-        """
-        INSERT INTO bets (capper, sport, risk_units, net_units, result, odds_text, timestamp_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            capper,
-            parsed.sport,
-            parsed.risk_units,
-            parsed.net_units,
-            parsed.result,
-            parsed.odds_text,
-            utc_iso(datetime.now(timezone.utc)),
-        ),
-    )
-    conn.commit()
+    # 2) Detect natural play -> pending
+    risk = detect_units(content)
+    if risk is None or risk <= 0:
+        await bot.process_commands(message)
+        return
 
-    await message.channel.send("✅ Bet logged")
+    sport = detect_sport(message.channel.id, content)
+    odds_text = detect_odds_text(content)
+
+    upsert_pending(message.id, message.channel.id, capper, sport, risk, odds_text, ts_utc)
+
+    if REACT_ON_PENDING:
+        try:
+            await message.add_reaction(EMOJI_PENDING)
+        except Exception:
+            pass
+
     await bot.process_commands(message)
+
+
+async def _grade_message(message: discord.Message, result: str) -> None:
+    pending = fetch_pending(message.id)
+    if not pending:
+        # Try backfill for old messages (if capper reacts before we saw the message)
+        risk = detect_units(message.content or "")
+        if risk is None or risk <= 0:
+            return
+        capper = TRACKED_CHANNELS.get(message.channel.id)
+        if not capper:
+            return
+        sport = detect_sport(message.channel.id, message.content or "")
+        odds_text = detect_odds_text(message.content or "")
+        ts_utc = utc_iso(message.created_at.replace(tzinfo=timezone.utc))
+        upsert_pending(message.id, message.channel.id, capper, sport, risk, odds_text, ts_utc)
+        pending = fetch_pending(message.id)
+
+    if not pending:
+        return
+
+    _, channel_id, capper, sport, risk, odds_text, ts_utc = pending
+    net = compute_net_units(risk, odds_text, result)
+
+    insert_graded_bet(
+        message_id=message.id,
+        channel_id=channel_id,
+        capper=capper,
+        sport=sport,
+        risk=risk,
+        odds_text=odds_text,
+        result=result,
+        net=net,
+        ts_utc=ts_utc,
+    )
+    delete_pending(message.id)
+
+    try:
+        await message.add_reaction(EMOJI_LOGGED)
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == (bot.user.id if bot.user else None):
+        return
+
+    channel_id = payload.channel_id
+    if channel_id not in TRACKED_CHANNELS:
+        return
+
+    owner_id = CAPPER_OWNERS.get(channel_id)
+    if owner_id is None or payload.user_id != owner_id:
+        return
+
+    emoji = str(payload.emoji)
+    if emoji not in {EMOJI_WIN, EMOJI_LOSS, EMOJI_PUSH}:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        return
+
+    try:
+        msg = await channel.fetch_message(payload.message_id)
+    except Exception:
+        return
+
+    # If already logged, force unlog first (capper should remove 📌 to regrade)
+    if emoji in {EMOJI_WIN, EMOJI_LOSS, EMOJI_PUSH}:
+        await _grade_message(
+            msg,
+            "win" if emoji == EMOJI_WIN else ("loss" if emoji == EMOJI_LOSS else "push"),
+        )
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    # Regrade trigger: capper removes 📌
+    channel_id = payload.channel_id
+    if channel_id not in TRACKED_CHANNELS:
+        return
+
+    owner_id = CAPPER_OWNERS.get(channel_id)
+    if owner_id is None or payload.user_id != owner_id:
+        return
+
+    emoji = str(payload.emoji)
+    if emoji != EMOJI_LOGGED:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        return
+
+    # Unlog bet -> restore pending
+    restored = delete_graded_bet(payload.message_id)
+    if not restored:
+        return
+
+    message_id, ch_id, capper, sport, risk, odds_text, ts_utc = restored
+    upsert_pending(message_id, ch_id, capper, sport, risk, odds_text, ts_utc)
+
+    try:
+        msg = await channel.fetch_message(message_id)
+        if REACT_ON_PENDING:
+            await msg.add_reaction(EMOJI_PENDING)
+    except Exception:
+        pass
 
 
 # =====================
@@ -613,20 +906,11 @@ async def ping(ctx: commands.Context):
 
 
 @bot.command()
-async def sports(ctx: commands.Context):
-    s = list_sports()
-    if not s:
-        await ctx.send("No sports recorded yet.")
-        return
-    await ctx.send("**Sports recorded:** " + ", ".join(f"`{x}`" for x in s))
-
-
-@bot.command()
 async def daily(ctx: commands.Context, yyyy_mm_dd: str = ""):
     if yyyy_mm_dd:
         d = parse_yyyy_mm_dd(yyyy_mm_dd)
         if not d:
-            await ctx.send("Use: `bt!daily YYYY-MM-DD` (example: `bt!daily 2026-02-17`)")
+            await ctx.send("Use: `bt!daily YYYY-MM-DD`")
             return
         start_l, end_l = period_bounds_local("daily", d)
         title = f"Daily ({d.isoformat()})"
@@ -662,76 +946,10 @@ async def alltime(ctx: commands.Context):
 
 
 @bot.command()
-async def month(ctx: commands.Context, yyyy_mm: str):
-    parsed = parse_yyyy_mm(yyyy_mm)
-    if not parsed:
-        await ctx.send("Use: `bt!month YYYY-MM` (example: `bt!month 2026-02`)")
-        return
-    y, m = parsed
-    start_l = datetime(y, m, 1, 0, 0, 0, tzinfo=tzinfo())
-    end_l = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=tzinfo()) if m == 12 else datetime(y, m + 1, 1, 0, 0, 0, tzinfo=tzinfo())
-    await post_period_summary(ctx, f"Month ({yyyy_mm})", start_l, end_l)
-
-
-@bot.command()
-async def year(ctx: commands.Context, yyyy: str):
-    y = parse_year(yyyy)
-    if y is None:
-        await ctx.send("Use: `bt!year YYYY` (example: `bt!year 2026`)")
-        return
-    start_l = datetime(y, 1, 1, 0, 0, 0, tzinfo=tzinfo())
-    end_l = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=tzinfo())
-    await post_period_summary(ctx, f"Year ({y})", start_l, end_l)
-
-
-@bot.command()
-async def sport(ctx: commands.Context, sport_name: str, period: str = "daily"):
-    period = period.lower()
-    if period not in {"daily", "weekly", "monthly", "yearly"}:
-        await ctx.send("Use: `bt!sport NBA daily|weekly|monthly|yearly`")
-        return
-    start_l, end_l = period_bounds_local(period)
-    await post_period_summary(ctx, period.capitalize(), start_l, end_l, sport=sport_name)
-
-
-@bot.command()
-async def capper(ctx: commands.Context, capper_name: str, period: str = "daily", sport_name: str = ""):
-    capper_ok = capper_match(capper_name)
-    if not capper_ok:
-        await ctx.send("Unknown capper. Valid: " + ", ".join(f"`{c}`" for c in list_cappers()))
-        return
-
-    period = period.lower()
-    if period not in {"daily", "weekly", "monthly", "yearly"}:
-        await ctx.send("Use: `bt!capper PropKitchen daily|weekly|monthly|yearly [SPORT]`")
-        return
-
-    sport_filter = sport_name.strip() or None
-    start_l, end_l = period_bounds_local(period)
-    await post_period_summary(ctx, period.capitalize(), start_l, end_l, sport=sport_filter, capper=capper_ok)
-
-
-@bot.command()
 async def export(ctx: commands.Context, scope: str, value: str, sport_name: str = "", capper_name: str = ""):
-    """
-    Usage:
-      bt!export day 2026-02-17
-      bt!export month 2026-02
-      bt!export year 2026
-    Optional filters:
-      bt!export month 2026-02 NBA
-      bt!export month 2026-02 NBA PropKitchen
-    """
     scope = scope.lower().strip()
     sport_filter = sport_name.strip() or None
     capper_filter = capper_name.strip() or None
-
-    if capper_filter:
-        cm = capper_match(capper_filter)
-        if not cm:
-            await ctx.send("Unknown capper. Valid: " + ", ".join(f"`{c}`" for c in list_cappers()))
-            return
-        capper_filter = cm
 
     if scope == "day":
         d = parse_yyyy_mm_dd(value)
@@ -740,7 +958,6 @@ async def export(ctx: commands.Context, scope: str, value: str, sport_name: str 
             return
         start_l, end_l = period_bounds_local("daily", d)
         label = f"day_{d.isoformat()}"
-
     elif scope == "month":
         ym = parse_yyyy_mm(value)
         if not ym:
@@ -750,7 +967,6 @@ async def export(ctx: commands.Context, scope: str, value: str, sport_name: str 
         start_l = datetime(y, m, 1, 0, 0, 0, tzinfo=tzinfo())
         end_l = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=tzinfo()) if m == 12 else datetime(y, m + 1, 1, 0, 0, 0, tzinfo=tzinfo())
         label = f"month_{value}"
-
     elif scope == "year":
         y = parse_year(value)
         if y is None:
@@ -759,7 +975,6 @@ async def export(ctx: commands.Context, scope: str, value: str, sport_name: str 
         start_l = datetime(y, 1, 1, 0, 0, 0, tzinfo=tzinfo())
         end_l = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=tzinfo())
         label = f"year_{y}"
-
     else:
         await ctx.send("Use: `bt!export day|month|year <value> [SPORT] [CAPPER]`")
         return
@@ -772,7 +987,7 @@ async def export(ctx: commands.Context, scope: str, value: str, sport_name: str 
 
 
 # =====================
-# AUTOPOST (10AM ET, previous periods)
+# AUTOPOST
 # =====================
 
 @tasks.loop(minutes=1)
@@ -791,7 +1006,7 @@ async def autopost_loop():
     def banner(title: str) -> str:
         return f"🔥 VIP RECAP — {title} 🔥"
 
-    # DAILY: post yesterday
+    # DAILY: yesterday
     yesterday = nl.date() - timedelta(days=1)
     day_key = yesterday.isoformat()
     if _last_post_key["daily"] != day_key:
@@ -799,7 +1014,7 @@ async def autopost_loop():
         start_l, end_l = period_bounds_local("daily", yesterday)
         await post_period_summary(channel, banner(f"DAILY ({yesterday.isoformat()})"), start_l, end_l)
 
-    # WEEKLY: post previous Mon–Sun (run only on Monday)
+    # WEEKLY: previous week Mon–Sun (run Monday)
     if nl.weekday() == WEEKLY_POST_WEEKDAY:
         prev_week_ref = nl.date() - timedelta(days=7)
         start_l, end_l = period_bounds_local("weekly", prev_week_ref)
@@ -810,7 +1025,7 @@ async def autopost_loop():
             _last_post_key["weekly"] = week_key
             await post_period_summary(channel, banner(f"WEEKLY ({week_start} → {week_end})"), start_l, end_l)
 
-    # MONTHLY: post previous month (run only on the 1st)
+    # MONTHLY: previous month (run 1st)
     if nl.day == MONTHLY_POST_DAY:
         prev_month_ref = nl.date() - timedelta(days=1)
         start_l, end_l = period_bounds_local("monthly", prev_month_ref)
@@ -819,7 +1034,7 @@ async def autopost_loop():
             _last_post_key["monthly"] = month_label
             await post_period_summary(channel, banner(f"MONTHLY ({month_label})"), start_l, end_l)
 
-    # YEARLY: post previous year (run only on Jan 1)
+    # YEARLY: previous year (run Jan 1)
     if nl.month == 1 and nl.day == 1:
         prev_year_ref = nl.date() - timedelta(days=1)
         start_l, end_l = period_bounds_local("yearly", prev_year_ref)
@@ -830,4 +1045,3 @@ async def autopost_loop():
 
 
 bot.run(TOKEN)
-

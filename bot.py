@@ -863,6 +863,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    print("REACTION_ADD", payload.channel_id, payload.message_id, payload.user_id, str(payload.emoji))
+owner_id = CAPPER_OWNERS.get(channel_id)
+print("OWNER_CHECK", channel_id, owner_id)
+
     # Regrade trigger: capper removes 📌
     channel_id = payload.channel_id
     if channel_id not in TRACKED_CHANNELS:
@@ -1045,3 +1049,4 @@ async def autopost_loop():
 
 
 bot.run(TOKEN)
+

@@ -4,9 +4,9 @@ bot.py
 Discord betting tracker (channel-based cappers) using reaction grading.
 
 Flow (Option B):
-1) Capper posts a play in their private channel (normal message).
-2) Bot reacts 📝 to mark it as "pending".
-3) Capper grades by reacting:
+1) A play is posted in a tracked capper channel (can be capper user OR webhook).
+2) Bot reacts 📝 to mark it as "pending" (only if it contains units like 1u / 0.5u).
+3) The capper grades by reacting:
    ✅ = Win
    ❌ = Loss
    ➖ = Push
@@ -30,7 +30,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import discord
 import matplotlib.pyplot as plt
@@ -68,8 +68,7 @@ LOSS_EMOJI = "❌"
 PUSH_EMOJI = "➖"
 GRADE_EMOJIS = {WIN_EMOJI, LOSS_EMOJI, PUSH_EMOJI}
 
-# Only messages authored by these users in these channels are considered "plays"
-# And only these users' reactions count as grading.
+
 @dataclass(frozen=True)
 class Capper:
     name: str
@@ -222,7 +221,7 @@ ensure_schema()
 
 
 # =====================
-# PARSING PLAYS (freeform)
+# PARSING PLAYS
 # =====================
 
 RE_UNITS = re.compile(r"(?i)\b(\d+(?:\.\d+)?)\s*u\b")
@@ -297,11 +296,9 @@ def compute_net_units(risk: float, odds_text: str, result: str) -> float:
     if result == "loss":
         return -risk
 
-    # win
     if not odds_text:
         return risk
 
-    # multiplier "3.15x"
     if odds_text.lower().endswith("x"):
         try:
             mult = float(odds_text[:-1])
@@ -311,7 +308,6 @@ def compute_net_units(risk: float, odds_text: str, result: str) -> float:
         except Exception:
             return risk
 
-    # american "+120" / "-115"
     try:
         american = int(odds_text)
         return profit_from_american(risk, american)
@@ -342,7 +338,7 @@ def generate_units_chart(title: str, rows: List[Tuple[str, float, int, int, int]
 
 
 # =====================
-# REPORTING QUERIES
+# REPORTING
 # =====================
 
 def fetch_capper_rows(start_utc: datetime, end_utc: datetime) -> List[Tuple[str, float, int, int, int]]:
@@ -408,7 +404,9 @@ async def post_period_summary(channel: discord.abc.Messageable, title: str, star
     rows = fetch_capper_rows(start_utc, end_utc)
     vip_net, vip_w, vip_l, vip_p = fetch_vip_totals(start_utc, end_utc)
 
-    await channel.send(f"📊 **{title}**\n{make_vip_line(vip_net, vip_w, vip_l, vip_p)}\n\n{make_rows_text(rows)}")
+    await channel.send(
+        f"📊 **{title}**\n{make_vip_line(vip_net, vip_w, vip_l, vip_p)}\n\n{make_rows_text(rows)}"
+    )
 
     if rows:
         img = generate_units_chart(f"{title} Net Units", rows)
@@ -426,24 +424,19 @@ async def safe_add_reaction(msg: discord.Message, emoji: str) -> None:
         return
 
 
-async def safe_remove_reaction(msg: discord.Message, emoji: str, user: Optional[discord.abc.User] = None) -> None:
+async def safe_remove_reaction(msg: discord.Message, emoji: str) -> None:
     try:
-        if user is None:
-            await msg.clear_reaction(emoji)
-        else:
-            await msg.remove_reaction(emoji, user)
+        await msg.clear_reaction(emoji)
     except Exception:
         return
 
 
 def pending_exists(message_id: int) -> bool:
-    row = cur.execute("SELECT 1 FROM pending WHERE message_id = ?", (message_id,)).fetchone()
-    return row is not None
+    return cur.execute("SELECT 1 FROM pending WHERE message_id = ?", (message_id,)).fetchone() is not None
 
 
 def bet_exists(message_id: int) -> bool:
-    row = cur.execute("SELECT 1 FROM bets WHERE message_id = ?", (message_id,)).fetchone()
-    return row is not None
+    return cur.execute("SELECT 1 FROM bets WHERE message_id = ?", (message_id,)).fetchone() is not None
 
 
 def insert_pending(message_id: int, channel_id: int, capper: Capper, content: str) -> bool:
@@ -476,7 +469,7 @@ def insert_pending(message_id: int, channel_id: int, capper: Capper, content: st
     return True
 
 
-def grade_pending(message_id: int, result: str) -> Optional[Tuple[str, float]]:
+def grade_pending(message_id: int, result: str) -> bool:
     row = cur.execute(
         """
         SELECT channel_id, capper, capper_user_id, content, sport, risk_units, odds_text, created_utc
@@ -487,7 +480,7 @@ def grade_pending(message_id: int, result: str) -> Optional[Tuple[str, float]]:
     ).fetchone()
 
     if not row:
-        return None
+        return False
 
     channel_id, capper_name, capper_user_id, content, sport, risk, odds_text, created_utc = row
     net = compute_net_units(float(risk), str(odds_text), result)
@@ -514,11 +507,10 @@ def grade_pending(message_id: int, result: str) -> Optional[Tuple[str, float]]:
     )
     cur.execute("DELETE FROM pending WHERE message_id = ?", (message_id,))
     conn.commit()
+    return True
 
-    return str(capper_name), float(net)
 
-
-def ungrade_bet(message_id: int) -> Optional[Tuple[int, str, int, str]]:
+def ungrade_bet(message_id: int) -> bool:
     row = cur.execute(
         """
         SELECT channel_id, capper, capper_user_id, sport, risk_units, odds_text
@@ -529,13 +521,11 @@ def ungrade_bet(message_id: int) -> Optional[Tuple[int, str, int, str]]:
     ).fetchone()
 
     if not row:
-        return None
+        return False
 
     channel_id, capper_name, capper_user_id, sport, risk, odds_text = row
 
-    # We cannot reconstruct original message content from bets table reliably,
-    # but we can keep it "pending" with a minimal placeholder.
-    placeholder = f"{sport} | {risk}u | {odds_text}".strip()
+    placeholder = f"{sport} {risk}u {odds_text}".strip()
 
     cur.execute("DELETE FROM bets WHERE message_id = ?", (message_id,))
     cur.execute(
@@ -557,7 +547,7 @@ def ungrade_bet(message_id: int) -> Optional[Tuple[int, str, int, str]]:
         ),
     )
     conn.commit()
-    return int(channel_id), str(capper_name), int(capper_user_id), str(sport)
+    return True
 
 
 # =====================
@@ -573,7 +563,8 @@ async def on_ready() -> None:
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
-    if message.author.bot:
+    # Ignore our own bot messages
+    if bot.user and message.author.id == bot.user.id:
         return
 
     capper = TRACKED_CHANNELS.get(message.channel.id)
@@ -581,12 +572,21 @@ async def on_message(message: discord.Message) -> None:
         await bot.process_commands(message)
         return
 
-    # Only capper's own posts become "pending plays"
-    if message.author.id != capper.user_id:
+    # Allow either:
+    # - capper user posting, OR
+    # - a webhook posting (common for rich embed play posters)
+    is_capper_user = (message.author.id == capper.user_id)
+    is_webhook_post = (message.webhook_id is not None)
+
+    # If it's some other bot (not webhook), ignore
+    if message.author.bot and not is_webhook_post:
         await bot.process_commands(message)
         return
 
-    # Skip if already pending/graded
+    if not (is_capper_user or is_webhook_post):
+        await bot.process_commands(message)
+        return
+
     if pending_exists(message.id) or bet_exists(message.id):
         await bot.process_commands(message)
         return
@@ -600,7 +600,10 @@ async def on_message(message: discord.Message) -> None:
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
-    if payload.user_id == (bot.user.id if bot.user else 0):
+    if not bot.user:
+        return
+
+    if payload.user_id == bot.user.id:
         return
 
     emoji = str(payload.emoji)
@@ -615,7 +618,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     if payload.user_id != capper.user_id:
         return
 
-    # Must be pending
     if not pending_exists(payload.message_id):
         return
 
@@ -624,13 +626,12 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
         return
 
     try:
-        msg = await channel.fetch_message(payload.message_id)
+        msg = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
     except Exception:
         return
 
     result = "win" if emoji == WIN_EMOJI else ("loss" if emoji == LOSS_EMOJI else "push")
-    graded = grade_pending(payload.message_id, result)
-    if graded is None:
+    if not grade_pending(payload.message_id, result):
         return
 
     await safe_remove_reaction(msg, PENDING_REACTION)
@@ -639,6 +640,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
 
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
+    if not bot.user:
+        return
+
     emoji = str(payload.emoji)
     if emoji not in GRADE_EMOJIS:
         return
@@ -647,11 +651,9 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> Non
     if not capper:
         return
 
-    # Only that channel's capper can ungrade by removing their grade reaction
     if payload.user_id != capper.user_id:
         return
 
-    # Only if it was graded
     if not bet_exists(payload.message_id):
         return
 
@@ -660,12 +662,11 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> Non
         return
 
     try:
-        msg = await channel.fetch_message(payload.message_id)
+        msg = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
     except Exception:
         return
 
-    undone = ungrade_bet(payload.message_id)
-    if undone is None:
+    if not ungrade_bet(payload.message_id):
         return
 
     await safe_remove_reaction(msg, LOGGED_REACTION)
@@ -713,7 +714,7 @@ async def alltime(ctx: commands.Context) -> None:
 
 
 # =====================
-# AUTOPOST (10AM ET)
+# AUTOPOST
 # =====================
 
 _last_post_key: Dict[str, Optional[str]] = {"daily": None, "weekly": None, "monthly": None, "yearly": None}
@@ -743,7 +744,7 @@ async def autopost_loop() -> None:
         start_l, end_l = period_bounds_local("daily", yesterday)
         await post_period_summary(channel, banner(f"DAILY ({day_key})"), start_l, end_l)
 
-    # Weekly: post previous week on Monday
+    # Weekly: previous week on Monday
     if nl.weekday() == WEEKLY_POST_WEEKDAY:
         prev_week_ref = nl.date() - timedelta(days=7)
         start_l, end_l = period_bounds_local("weekly", prev_week_ref)
@@ -754,7 +755,7 @@ async def autopost_loop() -> None:
             _last_post_key["weekly"] = week_key
             await post_period_summary(channel, banner(f"WEEKLY ({week_start} → {week_end})"), start_l, end_l)
 
-    # Monthly: post previous month on 1st
+    # Monthly: previous month on the 1st
     if nl.day == MONTHLY_POST_DAY:
         prev_month_ref = nl.date() - timedelta(days=1)
         start_l, end_l = period_bounds_local("monthly", prev_month_ref)
@@ -763,4 +764,17 @@ async def autopost_loop() -> None:
             _last_post_key["monthly"] = month_label
             await post_period_summary(channel, banner(f"MONTHLY ({month_label})"), start_l, end_l)
 
-    # Yearly: post previous year on
+    # Yearly: previous year on Jan 1
+    if nl.month == 1 and nl.day == 1:
+        prev_year_ref = nl.date() - timedelta(days=1)
+        start_l, end_l = period_bounds_local("yearly", prev_year_ref)
+        year_label = f"{start_l.year}"
+        if _last_post_key["yearly"] != year_label:
+            _last_post_key["yearly"] = year_label
+            await post_period_summary(channel, banner(f"YEARLY ({year_label})"), start_l, end_l)
+
+
+if not TOKEN:
+    raise RuntimeError("Missing TOKEN environment variable (set it in Render Environment).")
+
+bot.run(TOKEN)

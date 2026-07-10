@@ -28,6 +28,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shlex
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -169,137 +170,6 @@ def parse_date_yyyy_mm_dd(value: str) -> Optional[date]:
         return datetime.strptime(value.strip(), "%Y-%m-%d").date()
     except Exception:
         return None
-
-
-MONTH_NAME_TO_NUMBER = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
-
-
-def normalize_lookup(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
-
-
-def resolve_capper_name(raw: str) -> str:
-    target = normalize_lookup(raw)
-    seen: Dict[str, str] = {}
-    for capper in TRACKED_CHANNELS.values():
-        seen[normalize_lookup(capper.name)] = capper.name
-    return seen.get(target, raw.strip())
-
-
-def known_sport_codes() -> set[str]:
-    return {code.upper() for code, _ in SPORT_KEYWORDS}
-
-
-def extract_sport_token(tokens: List[str]) -> Tuple[Optional[str], List[str]]:
-    remaining: List[str] = []
-    found: Optional[str] = None
-    sport_codes = known_sport_codes()
-    for token in tokens:
-        clean = token.strip().upper()
-        if found is None and clean in sport_codes:
-            found = clean
-        else:
-            remaining.append(token)
-    return found, remaining
-
-
-def month_bounds_local(year: int, month: int) -> Tuple[datetime, datetime]:
-    start = datetime(year, month, 1, 0, 0, 0, tzinfo=_tz())
-    if month == 12:
-        end = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
-    else:
-        end = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=_tz())
-    return start, end
-
-
-def period_filter_from_tokens(tokens: List[str]) -> Tuple[str, str, Tuple[object, ...]]:
-    """Parse friendly date tokens like july, 2026-07, thisweek, lastmonth."""
-    cleaned = [t.strip().lower() for t in tokens if t.strip()]
-    joined = " ".join(cleaned).replace("_", "").replace("-", "")
-    today = now_local().date()
-
-    if not cleaned:
-        return "All-Time", "", ()
-
-    def bounds_to_filter(label: str, start_l: datetime, end_l: datetime) -> Tuple[str, str, Tuple[object, ...]]:
-        return label, "created_utc >= ? AND created_utc < ?", (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l)))
-
-    # Exact month: 2026-07
-    for token in cleaned:
-        if re.fullmatch(r"\d{4}-\d{2}", token):
-            start_d = datetime.strptime(token, "%Y-%m").date().replace(day=1)
-            start_l, end_l = month_bounds_local(start_d.year, start_d.month)
-            return bounds_to_filter(f"{start_d.strftime('%B')} {start_d.year}", start_l, end_l)
-
-    # Exact year: 2026
-    for token in cleaned:
-        if re.fullmatch(r"\d{4}", token):
-            year = int(token)
-            start_l = datetime(year, 1, 1, 0, 0, 0, tzinfo=_tz())
-            end_l = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
-            return bounds_to_filter(str(year), start_l, end_l)
-
-    if joined in {"today"}:
-        start_l, end_l = period_bounds_local("daily", today)
-        return bounds_to_filter("Today", start_l, end_l)
-
-    if joined in {"yesterday"}:
-        start_l, end_l = period_bounds_local("daily", today - timedelta(days=1))
-        return bounds_to_filter("Yesterday", start_l, end_l)
-
-    if joined in {"thisweek", "week", "weekly"}:
-        start_l, end_l = period_bounds_local("weekly", today)
-        return bounds_to_filter("This Week", start_l, end_l)
-
-    if joined in {"lastweek", "previousweek"}:
-        start_l, end_l = period_bounds_local("weekly", today - timedelta(days=7))
-        return bounds_to_filter("Last Week", start_l, end_l)
-
-    if joined in {"thismonth", "month", "monthly"}:
-        start_l, end_l = period_bounds_local("monthly", today)
-        return bounds_to_filter("This Month", start_l, end_l)
-
-    if joined in {"lastmonth", "previousmonth"}:
-        first_this_month = today.replace(day=1)
-        prev_ref = first_this_month - timedelta(days=1)
-        start_l, end_l = period_bounds_local("monthly", prev_ref)
-        return bounds_to_filter(f"{start_l.strftime('%B')} {start_l.year}", start_l, end_l)
-
-    if joined in {"thisyear", "year", "yearly"}:
-        start_l, end_l = period_bounds_local("yearly", today)
-        return bounds_to_filter(str(today.year), start_l, end_l)
-
-    if joined in {"lastyear", "previousyear"}:
-        year = today.year - 1
-        start_l = datetime(year, 1, 1, 0, 0, 0, tzinfo=_tz())
-        end_l = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
-        return bounds_to_filter(str(year), start_l, end_l)
-
-    # Friendly month name: july / Jul / September. Uses current year.
-    for token in cleaned:
-        if token in MONTH_NAME_TO_NUMBER:
-            month = MONTH_NAME_TO_NUMBER[token]
-            start_l, end_l = month_bounds_local(today.year, month)
-            return bounds_to_filter(f"{start_l.strftime('%B')} {today.year}", start_l, end_l)
-
-    return "All-Time", "", ()
-
-
-def combine_where(parts: List[str], params: List[object]) -> Tuple[str, Tuple[object, ...]]:
-    return " AND ".join(parts) if parts else "1 = 1", tuple(params)
 
 
 # =====================
@@ -444,10 +314,10 @@ ensure_schema()
 # PARSING PLAYS
 # =====================
 
-RE_UNITS = re.compile(r"(?i)\b((?:\d+(?:\.\d+)?|\.\d+))\s*u\b")
+RE_UNITS = re.compile(r"(?i)(?<![\w.])((?:\d+(?:\.\d+)?|\.\d+))\s*u\b")
 RE_AMERICAN_PAREN = re.compile(r"(?i)\(([-+]\d{2,5})(?:\s+[A-Za-z ]+)?\)")
 RE_AMERICAN = re.compile(r"(?i)\b([-+]\d{2,5})\b")
-RE_MULT = re.compile(r"(?i)\b(\d+(?:\.\d+)?)\s*x\b")
+RE_MULT = re.compile(r"(?i)(?<![\w.])((?:\d+(?:\.\d+)?|\.\d+))\s*x\b")
 RE_LINE = re.compile(r"(?i)\b(?:over|under|o|u)\s*((?:\d+(?:\.\d+)?|\.\d+))\b")
 
 SPORT_KEYWORDS = [
@@ -863,16 +733,6 @@ def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[i
     return int(row[0] or 0), float(row[1] or 0.0), float(row[2] or 0.0), int(row[3] or 0), int(row[4] or 0), int(row[5] or 0)
 
 
-def clean_bet_display_text(content: str, market: str, max_len: int = 140) -> str:
-    """Return the best human-readable bet text for command output."""
-    text = normalize_space(content) or normalize_space(market)
-    if not text:
-        return "Bet details unavailable (old row before tracking upgrade)"
-    if len(text) > max_len:
-        return text[: max_len - 3].rstrip() + "..."
-    return text
-
-
 def fetch_recent_bets(where_sql: str, params: Tuple[object, ...], limit: int = 5) -> List[Tuple[str, str, str, float, float, str, str, str]]:
     rows = cur.execute(
         f"""
@@ -899,6 +759,18 @@ def fetch_recent_bets(where_sql: str, params: Tuple[object, ...], limit: int = 5
     ]
 
 
+def display_bet_text(content: str, market: str, max_len: int = 130) -> str:
+    # Prefer the original Discord message/embed text so recaps show the actual bet,
+    # not just the generic word "Bet."
+    text = normalize_space(content) or normalize_space(market) or "Bet details unavailable"
+    # Remove role pings from display to keep recaps clean.
+    text = re.sub(r"<@&\d+>", "", text)
+    text = normalize_space(text)
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
 def build_filtered_summary_text(title: str, where_sql: str, params: Tuple[object, ...]) -> str:
     total, risk, net, wins, losses, pushes = fetch_filtered_totals(where_sql, params)
     graded = wins + losses
@@ -919,7 +791,7 @@ def build_filtered_summary_text(title: str, where_sql: str, params: Tuple[object
         lines.append("\n**Recent Bets**")
         for created, capper, result, risk_units, net_units, content, market, jump_url in recent:
             icon = "✅" if result == "win" else ("❌" if result == "loss" else "➖")
-            bet_text = clean_bet_display_text(content, market)
+            bet_text = display_bet_text(content, market)
             if jump_url:
                 lines.append(f"{icon} **{capper}** | {bet_text} | {net_units:+.2f}u | [jump]({jump_url})")
             else:
@@ -930,6 +802,209 @@ def build_filtered_summary_text(title: str, where_sql: str, params: Tuple[object
 
 async def post_filtered_summary(ctx: commands.Context, title: str, where_sql: str, params: Tuple[object, ...]) -> None:
     await ctx.send(build_filtered_summary_text(title, where_sql, params))
+
+
+# =====================
+# FILTER / DATE HELPERS
+# =====================
+
+MONTH_NAMES = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+SPORT_CODES = {code for code, _keys in SPORT_KEYWORDS}
+
+
+def normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def capper_aliases() -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for capper in TRACKED_CHANNELS.values():
+        aliases[normalize_key(capper.name)] = capper.name
+
+    # Friendly shortcuts. These do not change how the capper is stored.
+    aliases.setdefault("pk", "PropKitchen")
+    aliases.setdefault("propkitchen", "PropKitchen")
+    aliases.setdefault("matt", "mattlocks")
+    aliases.setdefault("mattlocks", "mattlocks")
+    aliases.setdefault("mike", "mikelocks")
+    aliases.setdefault("mikelocks", "mikelocks")
+    aliases.setdefault("bray", "betsbybray")
+    aliases.setdefault("clip", "clipset")
+    aliases.setdefault("clipset", "clipset")
+    aliases.setdefault("daijon", "DaijonBets")
+    aliases.setdefault("daijonbets", "DaijonBets")
+    return aliases
+
+
+def split_args(raw: str) -> List[str]:
+    try:
+        return shlex.split(raw or "")
+    except Exception:
+        return (raw or "").split()
+
+
+def resolve_capper_from_tokens(tokens: List[str]) -> Tuple[Optional[str], List[str]]:
+    aliases = capper_aliases()
+    best_name: Optional[str] = None
+    best_i = 0
+
+    # Try longest prefix first so "Matt Locks" can resolve to mattlocks.
+    for i in range(1, min(len(tokens), 4) + 1):
+        key = normalize_key(" ".join(tokens[:i]))
+        if key in aliases:
+            best_name = aliases[key]
+            best_i = i
+
+    if best_name is None:
+        return None, tokens
+    return best_name, tokens[best_i:]
+
+
+def resolve_sport_from_tokens(tokens: List[str]) -> Tuple[Optional[str], List[str]]:
+    if not tokens:
+        return None, tokens
+
+    first = tokens[0].upper()
+    if first in SPORT_CODES:
+        return first, tokens[1:]
+
+    # Friendly league/sport words used often in Discord commands.
+    aliases = {
+        "BASEBALL": "MLB",
+        "FOOTBALL": "NFL",
+        "BASKETBALL": "NBA",
+        "SOCCER": "SOCCER",
+        "TENNIS": "TENNIS",
+        "HOCKEY": "NHL",
+    }
+    key = first.replace("-", "")
+    if key in aliases:
+        return aliases[key], tokens[1:]
+
+    return None, tokens
+
+
+def local_day_bounds(day: date) -> Tuple[datetime, datetime]:
+    start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=_tz())
+    return start, start + timedelta(days=1)
+
+
+def local_month_bounds(year: int, month: int) -> Tuple[datetime, datetime]:
+    start = datetime(year, month, 1, 0, 0, 0, tzinfo=_tz())
+    if month == 12:
+        end = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
+    else:
+        end = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=_tz())
+    return start, end
+
+
+def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Optional[datetime], Optional[str]]:
+    """Return label/start/end/error. Blank means all-time."""
+    text = normalize_space(raw).lower()
+    text = text.replace("_", "-")
+
+    if not text or text in {"all", "alltime", "all-time", "lifetime"}:
+        return "All-Time", None, None, None
+
+    today = now_local().date()
+
+    if text in {"today", "todays"}:
+        start, end = local_day_bounds(today)
+        return f"Today ({today.isoformat()})", start, end, None
+
+    if text in {"yesterday", "yday", "yst"}:
+        day = today - timedelta(days=1)
+        start, end = local_day_bounds(day)
+        return f"Yesterday ({day.isoformat()})", start, end, None
+
+    if text in {"thisweek", "this-week", "this week", "week"}:
+        start, end = period_bounds_local("weekly", today)
+        return f"This Week ({start.date()} → {(end - timedelta(days=1)).date()})", start, end, None
+
+    if text in {"lastweek", "last-week", "last week"}:
+        ref = today - timedelta(days=7)
+        start, end = period_bounds_local("weekly", ref)
+        return f"Last Week ({start.date()} → {(end - timedelta(days=1)).date()})", start, end, None
+
+    if text in {"thismonth", "this-month", "this month", "month"}:
+        start, end = period_bounds_local("monthly", today)
+        return f"This Month ({start.year}-{start.month:02d})", start, end, None
+
+    if text in {"lastmonth", "last-month", "last month"}:
+        ref = today.replace(day=1) - timedelta(days=1)
+        start, end = period_bounds_local("monthly", ref)
+        return f"Last Month ({start.year}-{start.month:02d})", start, end, None
+
+    exact_day = parse_date_yyyy_mm_dd(text)
+    if exact_day:
+        start, end = local_day_bounds(exact_day)
+        return f"Date: {exact_day.isoformat()}", start, end, None
+
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        try:
+            month_start = datetime.strptime(text, "%Y-%m").date().replace(day=1)
+            start, end = local_month_bounds(month_start.year, month_start.month)
+            return f"Month: {text}", start, end, None
+        except Exception:
+            return None, None, None, "Use month format like `2026-07`."
+
+    if re.fullmatch(r"\d{4}", text):
+        year = int(text)
+        start = datetime(year, 1, 1, 0, 0, 0, tzinfo=_tz())
+        end = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
+        return f"Year: {year}", start, end, None
+
+    if text in MONTH_NAMES:
+        year = today.year
+        month = MONTH_NAMES[text]
+        start, end = local_month_bounds(year, month)
+        return f"Month: {year}-{month:02d}", start, end, None
+
+    return None, None, None, f"Could not understand time filter `{raw}`. Try `today`, `yesterday`, `july`, `2026-07`, or `2026-07-09`."
+
+
+def add_time_filter(where_parts: List[str], params: List[object], start_l: Optional[datetime], end_l: Optional[datetime]) -> None:
+    if start_l is None or end_l is None:
+        return
+    where_parts.append("created_utc >= ? AND created_utc < ?")
+    params.extend([utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))])
+
+
+def build_where(where_parts: List[str], params: List[object]) -> Tuple[str, Tuple[object, ...]]:
+    if not where_parts:
+        return "1 = 1", tuple()
+    return " AND ".join(f"({part})" for part in where_parts), tuple(params)
+
+
+async def post_query_summary(
+    ctx: commands.Context,
+    base_title: str,
+    where_parts: List[str],
+    params: List[object],
+    time_text: str = "",
+) -> None:
+    label, start_l, end_l, error = parse_time_filter(time_text)
+    if error:
+        await ctx.send(error)
+        return
+    add_time_filter(where_parts, params, start_l, end_l)
+    where_sql, final_params = build_where(where_parts, params)
+    title = base_title if not label or label == "All-Time" else f"{base_title} — {label}"
+    await post_filtered_summary(ctx, title, where_sql, final_params)
 
 
 # =====================
@@ -1062,6 +1137,12 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
         sportsbook = sportsbook or str(fields["sportsbook"])
         odds_format = odds_format or str(fields["odds_format"])
         multiplier = multiplier if multiplier is not None else fields["multiplier"]
+
+    # Safety check: older code could misread leading decimals like .5u as 5u.
+    # Always trust the original message text when it contains a valid unit amount.
+    parsed_risk = parse_risk_units(str(content or ""))
+    if parsed_risk is not None:
+        risk = float(parsed_risk)
 
     net = compute_net_units(float(risk), str(odds_text), result)
 
@@ -1383,32 +1464,38 @@ async def ping(ctx: commands.Context) -> None:
     await ctx.send("pong")
 
 
-@bot.command(name="commands", aliases=["guide", "howto"])
+@bot.command(name="commands", aliases=["command", "cmds", "guide"])
 async def commands_cmd(ctx: commands.Context) -> None:
     await ctx.send(
-        "📌 **Bet Tracker Commands**\n\n"
-        "**Basic Recaps**\n"
-        "`bt!daily` — today\n"
-        "`bt!weekly` — current week\n"
-        "`bt!monthly` — current month\n"
-        "`bt!yearly` — current year\n"
-        "`bt!alltime` — all tracked bets\n\n"
-        "**Cleaner Filters**\n"
-        "`bt!capper PropKitchen`\n"
-        "`bt!capper gr8 july`\n"
-        "`bt!capper gr8 WNBA july`\n"
-        "`bt!sport WNBA july`\n"
-        "`bt!player Paige Bueckers`\n"
-        "`bt!bettype Rebounds`\n"
+        "📌 **BetTracker Commands**\n"
+        "Run these in `#vipbot-commands`.\n\n"
+        "**Basic**\n"
+        "`bt!ping`\n"
+        "`bt!pending`\n"
+        "`bt!commands`\n\n"
+        "**Dates**\n"
+        "`bt!today`\n"
+        "`bt!yesterday`\n"
+        "`bt!date 2026-07-09`\n"
         "`bt!month 2026-07`\n"
         "`bt!year 2026`\n"
         "`bt!range 2026-07-01 2026-07-31`\n\n"
-        "**Pending / Admin**\n"
-        "`bt!pending` — pending count by capper\n"
-        "`bt!clear_pending` — clear all pending rows/reset pending board\n"
-        "`bt!clear_pending gr8` — clear pending for one capper\n"
-        "`bt!backfill_content 200` — recover exact bet text for old rows where possible\n"
-        "`bt!recalc_multipliers` — fix old multiplier math rows"
+        "**Cleaner Capper Commands**\n"
+        "`bt!capper PropKitchen today`\n"
+        "`bt!capper PropKitchen yesterday`\n"
+        "`bt!capper PropKitchen 2026-07-09`\n"
+        "`bt!capper gr8 july`\n"
+        "`bt!capper gr8 WNBA july`\n\n"
+        "**Sport / Player / Bet Type**\n"
+        "`bt!sport WNBA today`\n"
+        "`bt!sport MLB 2026-07-09`\n"
+        "`bt!player Paige Bueckers`\n"
+        "`bt!bettype Rebounds`\n\n"
+        "**Admin**\n"
+        "`bt!fix_decimal_units`\n"
+        "`bt!recalc_multipliers`\n"
+        "`bt!clear_pending_old`\n"
+        "`bt!clear_pending_before today`"
     )
 
 
@@ -1443,6 +1530,21 @@ async def alltime(ctx: commands.Context) -> None:
     await post_period_summary(ctx, "All-Time", start_l, end_l)
 
 
+@bot.command(name="today")
+async def today_cmd(ctx: commands.Context) -> None:
+    await post_query_summary(ctx, "VIP Results", [], [], "today")
+
+
+@bot.command(name="yesterday", aliases=["yday"])
+async def yesterday_cmd(ctx: commands.Context) -> None:
+    await post_query_summary(ctx, "VIP Results", [], [], "yesterday")
+
+
+@bot.command(name="date")
+async def date_cmd(ctx: commands.Context, date_arg: str) -> None:
+    await post_query_summary(ctx, "VIP Results", [], [], date_arg)
+
+
 @bot.command(name="pending")
 async def pending_cmd(ctx: commands.Context) -> None:
     rows = cur.execute(
@@ -1465,151 +1567,152 @@ async def pending_cmd(ctx: commands.Context) -> None:
     await ctx.send("\n".join(lines))
 
 
-@bot.command(name="clear_pending", aliases=["clearpending", "reset_pending", "resetpending"])
-@commands.has_permissions(manage_guild=True)
-async def clear_pending_cmd(ctx: commands.Context, *, capper_name: str = "") -> None:
-    """Clear pending bets without deleting graded betting history."""
-    capper_name = capper_name.strip()
-
-    if capper_name:
-        resolved = resolve_capper_name(capper_name)
-        rows = cur.execute(
-            """
-            SELECT message_id, channel_id, capper
-            FROM pending
-            WHERE LOWER(capper) = ?
-            """,
-            (resolved.lower(),),
-        ).fetchall()
-    else:
-        resolved = "ALL"
-        rows = cur.execute(
-            """
-            SELECT message_id, channel_id, capper
-            FROM pending
-            """
-        ).fetchall()
-
-    if not rows:
-        await ctx.send("🧹 **Pending Reset:** No pending bets found.")
-        return
-
-    cleared_reactions = 0
-    for message_id, channel_id, _capper in rows:
-        channel = bot.get_channel(int(channel_id))
-        if channel is None:
-            continue
-        try:
-            msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
-        except Exception:
-            continue
-        await safe_clear_reaction(msg, PENDING_REACTION)
-        cleared_reactions += 1
-
-    if capper_name:
-        cur.execute("DELETE FROM pending WHERE LOWER(capper) = ?", (resolved.lower(),))
-    else:
-        cur.execute("DELETE FROM pending")
-    conn.commit()
-
-    target = resolved if capper_name else "all cappers"
-    await ctx.send(
-        "🧹 **Pending Reset Complete**\n"
-        f"Target: **{target}**\n"
-        f"Deleted pending rows: **{len(rows)}**\n"
-        f"Cleared 📝 reactions where possible: **{cleared_reactions}**\n"
-        "Graded bets/history were **not** deleted."
-    )
-
-
-@bot.command(name="backfill_content", aliases=["backfill", "backfill_recent"])
-@commands.has_permissions(manage_guild=True)
-async def backfill_content_cmd(ctx: commands.Context, limit: int = 100) -> None:
-    """Try to recover exact bet text for old rows by fetching original Discord messages."""
-    limit = max(1, min(int(limit), 500))
+async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tuple[object, ...], label: str) -> None:
     rows = cur.execute(
-        """
-        SELECT message_id, channel_id, odds_text, sport
-        FROM bets
-        WHERE COALESCE(content, '') = '' OR COALESCE(market, '') = ''
-        ORDER BY created_utc DESC
-        LIMIT ?
+        f"""
+        SELECT message_id, channel_id, capper
+        FROM pending
+        WHERE {where_sql}
         """,
-        (limit,),
+        params,
     ).fetchall()
 
     if not rows:
-        await ctx.send("✅ No old rows needed content backfill.")
+        await ctx.send(f"📝 No pending bets found for **{label}**.")
         return
 
-    checked = 0
-    updated = 0
-    missing = 0
-
-    for message_id, channel_id, old_odds_text, old_sport in rows:
-        checked += 1
+    # Remove the 📝 reaction where possible. If Discord permissions fail, the DB cleanup still works.
+    reactions_cleared = 0
+    for message_id, channel_id, capper_name in rows:
         channel = bot.get_channel(int(channel_id))
         if channel is None:
-            missing += 1
             continue
         try:
             msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
+            await msg.clear_reaction(PENDING_REACTION)
+            reactions_cleared += 1
         except Exception:
-            missing += 1
             continue
 
-        content = message_to_text(msg)
-        if not content:
-            missing += 1
+    cur.execute(f"DELETE FROM pending WHERE {where_sql}", params)
+    conn.commit()
+
+    await ctx.send(
+        f"✅ **Pending Cleared: {label}**\n"
+        f"Removed pending rows: **{len(rows)}**\n"
+        f"Removed 📝 reactions where possible: **{reactions_cleared}**\n"
+        "Graded bet history was **not** deleted."
+    )
+
+
+@bot.command(name="clear_pending")
+@commands.has_permissions(manage_guild=True)
+async def clear_pending_cmd(ctx: commands.Context, *, capper_name: str = "") -> None:
+    if capper_name.strip():
+        tokens = split_args(capper_name)
+        capper, remaining = resolve_capper_from_tokens(tokens)
+        if not capper:
+            await ctx.send("Could not find that capper. Example: `bt!clear_pending gr8`")
+            return
+        await clear_pending_rows(ctx, "LOWER(capper) = ?", (capper.lower(),), capper)
+        return
+
+    await clear_pending_rows(ctx, "1 = 1", tuple(), "All Pending Bets")
+
+
+@bot.command(name="clear_pending_old", aliases=["clearoldpending", "clear_stale_pending"])
+@commands.has_permissions(manage_guild=True)
+async def clear_pending_old_cmd(ctx: commands.Context) -> None:
+    # Safe reset: clears stale pending plays before today, leaves today's active plays alone.
+    today = now_local().date()
+    start_today, _end_today = local_day_bounds(today)
+    cutoff_utc = utc_iso(to_utc(start_today))
+    await clear_pending_rows(ctx, "created_utc < ?", (cutoff_utc,), f"Before Today ({today.isoformat()})")
+
+
+@bot.command(name="clear_pending_before")
+@commands.has_permissions(manage_guild=True)
+async def clear_pending_before_cmd(ctx: commands.Context, *, cutoff: str) -> None:
+    label, start_l, _end_l, error = parse_time_filter(cutoff)
+    if error or start_l is None:
+        await ctx.send("Use format: `bt!clear_pending_before today` or `bt!clear_pending_before 2026-07-10`")
+        return
+
+    cutoff_utc = utc_iso(to_utc(start_l))
+    await clear_pending_rows(ctx, "created_utc < ?", (cutoff_utc,), f"Before {label}")
+
+
+@bot.command(name="fix_decimal_units", aliases=["fixdecimals", "fix_decimal", "fixunits", "fix_units"])
+@commands.has_permissions(manage_guild=True)
+async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
+    """Repair rows created when leading decimals like .5u were parsed as 5u."""
+
+    checked_bets = 0
+    updated_bets = 0
+    checked_pending = 0
+    updated_pending = 0
+    old_total = 0.0
+    new_total = 0.0
+
+    bet_rows = cur.execute(
+        """
+        SELECT id, content, risk_units, odds_text, result, net_units
+        FROM bets
+        """
+    ).fetchall()
+
+    for bet_id, content, old_risk, odds_text, result, old_net in bet_rows:
+        checked_bets += 1
+        parsed_risk = parse_risk_units(str(content or ""))
+        if parsed_risk is None:
             continue
 
-        odds_text = str(old_odds_text or "") or parse_odds_text(content)
-        fields = parse_analytics_fields(content, odds_text)
-        sport = str(fields["sport"]) if str(fields["sport"]) != "UNKNOWN" else str(old_sport or "UNKNOWN")
+        old_risk_f = float(old_risk or 0.0)
+        if abs(parsed_risk - old_risk_f) <= 0.0001:
+            continue
+
+        new_net = compute_net_units(float(parsed_risk), str(odds_text or ""), str(result or ""))
+        old_net_f = float(old_net or 0.0)
 
         cur.execute(
-            """
-            UPDATE bets
-            SET
-                content = ?,
-                jump_url = ?,
-                sport = ?,
-                league = ?,
-                player = ?,
-                bet_type = ?,
-                market = ?,
-                line = ?,
-                sportsbook = ?,
-                odds_text = ?,
-                odds_format = ?,
-                multiplier = ?
-            WHERE message_id = ?
-            """,
-            (
-                content,
-                msg.jump_url,
-                sport,
-                str(fields["league"]),
-                str(fields["player"]),
-                str(fields["bet_type"]),
-                str(fields["market"]),
-                str(fields["line"]),
-                str(fields["sportsbook"]),
-                odds_text,
-                str(fields["odds_format"]),
-                fields["multiplier"],
-                int(message_id),
-            ),
+            "UPDATE bets SET risk_units = ?, net_units = ? WHERE id = ?",
+            (float(parsed_risk), float(new_net), int(bet_id)),
         )
-        updated += 1
+        updated_bets += 1
+        old_total += old_net_f
+        new_total += float(new_net)
+
+    pending_rows = cur.execute(
+        """
+        SELECT message_id, content, risk_units
+        FROM pending
+        """
+    ).fetchall()
+
+    for message_id, content, old_risk in pending_rows:
+        checked_pending += 1
+        parsed_risk = parse_risk_units(str(content or ""))
+        if parsed_risk is None:
+            continue
+
+        old_risk_f = float(old_risk or 0.0)
+        if abs(parsed_risk - old_risk_f) <= 0.0001:
+            continue
+
+        cur.execute(
+            "UPDATE pending SET risk_units = ? WHERE message_id = ?",
+            (float(parsed_risk), int(message_id)),
+        )
+        updated_pending += 1
 
     conn.commit()
+
     await ctx.send(
-        "✅ **Backfill Complete**\n"
-        f"Checked: **{checked}** old rows\n"
-        f"Updated with exact bet text: **{updated}**\n"
-        f"Could not fetch/fill: **{missing}**\n"
-        "Now try your command again and recent bets should show more exact text where Discord messages were recoverable."
+        "✅ **Decimal Unit Fix Complete**\n"
+        "This fixes mistakes like `.5u` being read as `5u` or `.25u` being read as `25u`.\n"
+        f"Checked graded bets: **{checked_bets}** | Updated: **{updated_bets}**\n"
+        f"Checked pending bets: **{checked_pending}** | Updated: **{updated_pending}**\n"
+        f"Corrected net change on updated graded bets: **{(new_total - old_total):+.2f}u**"
     )
 
 
@@ -1652,32 +1755,75 @@ async def recalc_multipliers_cmd(ctx: commands.Context) -> None:
     )
 
 
+@bot.command(name="backfill_content")
+@commands.has_permissions(manage_guild=True)
+async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
+    limit = max(1, min(int(limit), 500))
+    rows = cur.execute(
+        """
+        SELECT id, message_id, channel_id
+        FROM bets
+        WHERE content = '' OR content IS NULL
+        ORDER BY created_utc DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    updated = 0
+    checked = 0
+    for bet_id, message_id, channel_id in rows:
+        checked += 1
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            continue
+        try:
+            msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
+        except Exception:
+            continue
+
+        content = message_to_text(msg)
+        if not content:
+            continue
+        odds_text = parse_odds_text(content)
+        fields = parse_analytics_fields(content, odds_text)
+        cur.execute(
+            """
+            UPDATE bets
+            SET content = ?, market = ?, player = ?, bet_type = ?, league = ?, sport = ?,
+                line = ?, sportsbook = ?, odds_format = ?, multiplier = ?
+            WHERE id = ?
+            """,
+            (
+                content,
+                str(fields["market"]),
+                str(fields["player"]),
+                str(fields["bet_type"]),
+                str(fields["league"]),
+                str(fields["sport"]),
+                str(fields["line"]),
+                str(fields["sportsbook"]),
+                str(fields["odds_format"]),
+                fields["multiplier"],
+                int(bet_id),
+            ),
+        )
+        updated += 1
+
+    conn.commit()
+    await ctx.send(f"✅ **Backfill Complete**\nChecked: **{checked}** rows\nUpdated with recovered bet text: **{updated}**")
+
+
 @bot.command(name="sport")
-async def sport_cmd(ctx: commands.Context, *, sport_name: str) -> None:
-    tokens = sport_name.strip().split()
-    if not tokens:
-        await ctx.send("Use format: `bt!sport WNBA` or `bt!sport WNBA july`")
+async def sport_cmd(ctx: commands.Context, *, query: str) -> None:
+    tokens = split_args(query)
+    sport, remaining = resolve_sport_from_tokens(tokens)
+    if not sport:
+        await ctx.send("Use format: `bt!sport WNBA`, `bt!sport WNBA today`, or `bt!sport MLB 2026-07-09`")
         return
 
-    sport, remaining = extract_sport_token(tokens)
-    if sport is None:
-        sport = tokens[0].strip().upper()
-        remaining = tokens[1:]
-
-    where_parts = ["UPPER(sport) = ?"]
-    params: List[object] = [sport]
-
-    period_label, period_sql, period_params = period_filter_from_tokens(remaining)
-    if period_sql:
-        where_parts.append(period_sql)
-        params.extend(period_params)
-
-    title = f"Sport: {sport}"
-    if period_label != "All-Time":
-        title += f" — {period_label}"
-
-    where_sql, final_params = combine_where(where_parts, params)
-    await post_filtered_summary(ctx, title, where_sql, final_params)
+    time_text = " ".join(remaining)
+    await post_query_summary(ctx, f"Sport: {sport}", ["UPPER(sport) = ?"], [sport], time_text)
 
 
 @bot.command(name="league")
@@ -1687,37 +1833,28 @@ async def league_cmd(ctx: commands.Context, *, league_name: str) -> None:
 
 
 @bot.command(name="capper")
-async def capper_cmd(ctx: commands.Context, *, capper_name: str) -> None:
-    tokens = capper_name.strip().split()
-    if not tokens:
-        await ctx.send("Use format: `bt!capper PropKitchen`, `bt!capper gr8 july`, or `bt!capper gr8 WNBA july`")
+async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
+    tokens = split_args(query)
+    capper, remaining = resolve_capper_from_tokens(tokens)
+    if not capper:
+        await ctx.send(
+            "Use format: `bt!capper PropKitchen`, `bt!capper PropKitchen yesterday`, "
+            "`bt!capper PropKitchen 2026-07-09`, or `bt!capper gr8 WNBA july`"
+        )
         return
 
-    capper_display = resolve_capper_name(tokens[0])
-    remaining = tokens[1:]
-
-    sport, remaining = extract_sport_token(remaining)
-    period_label, period_sql, period_params = period_filter_from_tokens(remaining)
-
+    sport, remaining = resolve_sport_from_tokens(remaining)
     where_parts = ["LOWER(capper) = ?"]
-    params: List[object] = [capper_display.lower()]
+    params: List[object] = [capper.lower()]
+    title = f"Capper: {capper}"
 
     if sport:
         where_parts.append("UPPER(sport) = ?")
         params.append(sport)
-
-    if period_sql:
-        where_parts.append(period_sql)
-        params.extend(period_params)
-
-    title = f"Capper: {capper_display}"
-    if sport:
         title += f" — {sport}"
-    if period_label != "All-Time":
-        title += f" — {period_label}"
 
-    where_sql, final_params = combine_where(where_parts, params)
-    await post_filtered_summary(ctx, title, where_sql, final_params)
+    time_text = " ".join(remaining)
+    await post_query_summary(ctx, title, where_parts, params, time_text)
 
 
 @bot.command(name="player")
@@ -1744,43 +1881,12 @@ async def bettype_cmd(ctx: commands.Context, *, bet_type: str) -> None:
 
 @bot.command(name="month")
 async def month_cmd(ctx: commands.Context, ym: str) -> None:
-    try:
-        start = datetime.strptime(ym.strip(), "%Y-%m").date().replace(day=1)
-    except Exception:
-        await ctx.send("Use format: `bt!month 2026-07`")
-        return
-
-    start_l = datetime(start.year, start.month, 1, 0, 0, 0, tzinfo=_tz())
-    if start.month == 12:
-        end_l = datetime(start.year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
-    else:
-        end_l = datetime(start.year, start.month + 1, 1, 0, 0, 0, tzinfo=_tz())
-
-    await post_filtered_summary(
-        ctx,
-        f"Month: {ym.strip()}",
-        "created_utc >= ? AND created_utc < ?",
-        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
-    )
+    await post_query_summary(ctx, "VIP Results", [], [], ym)
 
 
 @bot.command(name="year")
 async def year_cmd(ctx: commands.Context, yyyy: str) -> None:
-    try:
-        year = int(yyyy.strip())
-    except Exception:
-        await ctx.send("Use format: `bt!year 2026`")
-        return
-
-    start_l = datetime(year, 1, 1, 0, 0, 0, tzinfo=_tz())
-    end_l = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
-
-    await post_filtered_summary(
-        ctx,
-        f"Year: {year}",
-        "created_utc >= ? AND created_utc < ?",
-        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
-    )
+    await post_query_summary(ctx, "VIP Results", [], [], yyyy)
 
 
 @bot.command(name="range")

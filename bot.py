@@ -3,15 +3,16 @@ bot.py
 
 Discord betting tracker (channel-based cappers) using reaction grading.
 
-Flow (Option B):
+Flow:
 1) A play is posted in a tracked capper channel (can be capper user OR webhook).
-2) Bot reacts 📝 to mark it as "pending" (only if it contains units like 1u / 0.5u).
+2) Bot reacts 📝 to mark it as pending (only if it contains units like 1u / .25u / 0.5u).
 3) The capper grades by reacting:
    ✅ = Win
    ❌ = Loss
    ➖ = Push
-4) Bot logs the result to SQLite and reacts 📌 (no extra messages).
-5) If capper removes ✅/❌/➖, bot ungrades (removes from DB), switches back to 📝.
+4) Bot logs the result to SQLite and reacts 📌.
+5) If capper removes ✅/❌/➖, bot ungrades and switches back to 📝.
+6) If capper adds a different grading reaction later, bot can regrade the bet.
 
 Recaps:
 - Auto-post Daily recap at 10:00 AM ET (yesterday) into SUMMARY_CHANNEL_ID.
@@ -75,6 +76,9 @@ class Capper:
     user_id: int
 
 
+# Add new cappers here only.
+# Format:
+# CHANNEL_ID: Capper("DisplayName", DISCORD_USER_ID),
 TRACKED_CHANNELS: Dict[int, Capper] = {
     1257081246509563944: Capper("PropKitchen", 1230980936657535061),
     1258244563726893106: Capper("hotshot", 475659527337934849),
@@ -85,6 +89,7 @@ TRACKED_CHANNELS: Dict[int, Capper] = {
     1409640332295147570: Capper("gr8", 1109269360037601411),
     1430746272192659569: Capper("mikelocks", 1430751846125010970),
     1424256774692667422: Capper("betsbybray", 865284268745949194),
+    1515610298696863885: Capper("DaijonBets", 1168899954660614155),
 }
 
 
@@ -159,6 +164,13 @@ def period_bounds_local(period: str, ref: Optional[date] = None) -> Tuple[dateti
     return start, start + timedelta(days=1)
 
 
+def parse_date_yyyy_mm_dd(value: str) -> Optional[date]:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
 # =====================
 # DATABASE
 # =====================
@@ -175,6 +187,16 @@ conn = db_connect()
 cur = conn.cursor()
 
 
+def table_columns(table_name: str) -> set[str]:
+    rows = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def add_column_if_missing(table_name: str, column_name: str, column_definition: str) -> None:
+    if column_name not in table_columns(table_name):
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
 def ensure_schema() -> None:
     cur.execute(
         """
@@ -187,7 +209,19 @@ def ensure_schema() -> None:
             created_utc TEXT NOT NULL,
             sport TEXT NOT NULL,
             risk_units REAL NOT NULL,
-            odds_text TEXT NOT NULL
+            odds_text TEXT NOT NULL,
+            jump_url TEXT NOT NULL DEFAULT '',
+            league TEXT NOT NULL DEFAULT '',
+            event TEXT NOT NULL DEFAULT '',
+            player TEXT NOT NULL DEFAULT '',
+            team TEXT NOT NULL DEFAULT '',
+            opponent TEXT NOT NULL DEFAULT '',
+            bet_type TEXT NOT NULL DEFAULT '',
+            market TEXT NOT NULL DEFAULT '',
+            line TEXT NOT NULL DEFAULT '',
+            sportsbook TEXT NOT NULL DEFAULT '',
+            odds_format TEXT NOT NULL DEFAULT '',
+            multiplier REAL
         )
         """
     )
@@ -206,14 +240,69 @@ def ensure_schema() -> None:
             result TEXT NOT NULL,
             odds_text TEXT NOT NULL,
             created_utc TEXT NOT NULL,
-            graded_utc TEXT NOT NULL
+            graded_utc TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            jump_url TEXT NOT NULL DEFAULT '',
+            league TEXT NOT NULL DEFAULT '',
+            event TEXT NOT NULL DEFAULT '',
+            player TEXT NOT NULL DEFAULT '',
+            team TEXT NOT NULL DEFAULT '',
+            opponent TEXT NOT NULL DEFAULT '',
+            bet_type TEXT NOT NULL DEFAULT '',
+            market TEXT NOT NULL DEFAULT '',
+            line TEXT NOT NULL DEFAULT '',
+            sportsbook TEXT NOT NULL DEFAULT '',
+            odds_format TEXT NOT NULL DEFAULT '',
+            multiplier REAL,
+            grade_reaction TEXT NOT NULL DEFAULT ''
         )
         """
     )
 
+    # Safe migrations for existing Render database.
+    pending_columns = {
+        "jump_url": "TEXT NOT NULL DEFAULT ''",
+        "league": "TEXT NOT NULL DEFAULT ''",
+        "event": "TEXT NOT NULL DEFAULT ''",
+        "player": "TEXT NOT NULL DEFAULT ''",
+        "team": "TEXT NOT NULL DEFAULT ''",
+        "opponent": "TEXT NOT NULL DEFAULT ''",
+        "bet_type": "TEXT NOT NULL DEFAULT ''",
+        "market": "TEXT NOT NULL DEFAULT ''",
+        "line": "TEXT NOT NULL DEFAULT ''",
+        "sportsbook": "TEXT NOT NULL DEFAULT ''",
+        "odds_format": "TEXT NOT NULL DEFAULT ''",
+        "multiplier": "REAL",
+    }
+    for col, definition in pending_columns.items():
+        add_column_if_missing("pending", col, definition)
+
+    bet_columns = {
+        "content": "TEXT NOT NULL DEFAULT ''",
+        "jump_url": "TEXT NOT NULL DEFAULT ''",
+        "league": "TEXT NOT NULL DEFAULT ''",
+        "event": "TEXT NOT NULL DEFAULT ''",
+        "player": "TEXT NOT NULL DEFAULT ''",
+        "team": "TEXT NOT NULL DEFAULT ''",
+        "opponent": "TEXT NOT NULL DEFAULT ''",
+        "bet_type": "TEXT NOT NULL DEFAULT ''",
+        "market": "TEXT NOT NULL DEFAULT ''",
+        "line": "TEXT NOT NULL DEFAULT ''",
+        "sportsbook": "TEXT NOT NULL DEFAULT ''",
+        "odds_format": "TEXT NOT NULL DEFAULT ''",
+        "multiplier": "REAL",
+        "grade_reaction": "TEXT NOT NULL DEFAULT ''",
+    }
+    for col, definition in bet_columns.items():
+        add_column_if_missing("bets", col, definition)
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_graded_utc ON bets(graded_utc);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_created_utc ON bets(created_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_capper_time ON bets(capper, graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_sport_time ON bets(sport, graded_utc);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_league_time ON bets(league, graded_utc);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_bet_type_time ON bets(bet_type, graded_utc);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_player_time ON bets(player, graded_utc);")
     conn.commit()
 
 
@@ -224,10 +313,11 @@ ensure_schema()
 # PARSING PLAYS
 # =====================
 
-RE_UNITS = re.compile(r"(?i)\b(\d+(?:\.\d+)?)\s*u\b")
-RE_AMERICAN_PAREN = re.compile(r"(?i)\(([-+]\d{2,5})\)")
+RE_UNITS = re.compile(r"(?i)\b((?:\d+(?:\.\d+)?|\.\d+))\s*u\b")
+RE_AMERICAN_PAREN = re.compile(r"(?i)\(([-+]\d{2,5})(?:\s+[A-Za-z ]+)?\)")
 RE_AMERICAN = re.compile(r"(?i)\b([-+]\d{2,5})\b")
 RE_MULT = re.compile(r"(?i)\b(\d+(?:\.\d+)?)\s*x\b")
+RE_LINE = re.compile(r"(?i)\b(?:over|under|o|u)\s*((?:\d+(?:\.\d+)?|\.\d+))\b")
 
 SPORT_KEYWORDS = [
     ("NCAAB", ["NCAAB", "CBB", "COLLEGE BASKETBALL"]),
@@ -237,7 +327,7 @@ SPORT_KEYWORDS = [
     ("NCAAF", ["NCAAF", "CFB", "COLLEGE FOOTBALL"]),
     ("NHL", ["NHL", "HOCKEY"]),
     ("MLB", ["MLB", "BASEBALL"]),
-    ("SOCCER", ["SOCCER", "EPL", "UCL", "MLS", "LA LIGA", "SERIE A", "BUNDESLIGA"]),
+    ("SOCCER", ["SOCCER", "EPL", "UCL", "MLS", "LA LIGA", "SERIE A", "BUNDESLIGA", "WORLD CUP"]),
     ("TENNIS", ["TENNIS", "ATP", "WTA"]),
     ("ESPORTS", ["ESPORTS", "E-SPORTS", "CS2", "CSGO", "VALORANT", "LOL", "DOTA"]),
     ("UFC", ["UFC"]),
@@ -245,14 +335,124 @@ SPORT_KEYWORDS = [
     ("BOXING", ["BOXING"]),
 ]
 
+LEAGUE_KEYWORDS = [
+    ("WNBA", ["WNBA"]),
+    ("NBA", ["NBA"]),
+    ("NBA Summer League", ["SUMMER LEAGUE", "NBA SUMMER"]),
+    ("NCAAB", ["NCAAB", "CBB", "COLLEGE BASKETBALL"]),
+    ("NFL", ["NFL"]),
+    ("NCAAF", ["NCAAF", "CFB", "COLLEGE FOOTBALL"]),
+    ("MLB", ["MLB", "BASEBALL"]),
+    ("NHL", ["NHL", "HOCKEY"]),
+    ("World Cup", ["WORLD CUP"]),
+    ("Premier League", ["PREMIER LEAGUE", "EPL"]),
+    ("Champions League", ["CHAMPIONS LEAGUE", "UCL"]),
+    ("MLS", ["MLS"]),
+    ("La Liga", ["LA LIGA"]),
+    ("Serie A", ["SERIE A"]),
+    ("Bundesliga", ["BUNDESLIGA"]),
+    ("ATP", ["ATP"]),
+    ("WTA", ["WTA"]),
+]
+
+SPORTSBOOK_KEYWORDS = [
+    ("PrizePicks", ["PRIZEPICKS", "PRIZE PICKS", " PP "]),
+    ("Underdog", ["UNDERDOG", " UD "]),
+    ("Onyx", ["ONYX"]),
+    ("Hard Rock", ["HARD ROCK", " HR)", " HR "]),
+    ("DraftKings", ["DRAFTKINGS", " DK "]),
+    ("FanDuel", ["FANDUEL", " FD "]),
+    ("BetMGM", ["BETMGM", " MGM "]),
+    ("Caesars", ["CAESARS"]),
+    ("ESPN BET", ["ESPN BET"]),
+]
+
+BET_TYPE_RULES = [
+    ("Parlay", ["PARLAY", "COMBO", "BUILDER", "SLIP"]),
+    ("PRA", ["PRA", "PTS+REB+AST", "POINTS+REBOUNDS+ASSISTS", "PTS REB AST"]),
+    ("PR", [" PR ", "PTS+REB", "POINTS+REBOUNDS", "PTS REB"]),
+    ("PA", [" PA ", "PTS+AST", "POINTS+ASSISTS", "PTS AST"]),
+    ("RA", [" RA ", "REB+AST", "REBOUNDS+ASSISTS", "REB AST"]),
+    ("Points", ["POINTS", " PTS "]),
+    ("Rebounds", ["REBOUNDS", " REB "]),
+    ("Assists", ["ASSISTS", " AST "]),
+    ("3PM", ["3PM", "3 POINTER", "3-POINTER", "THREES"]),
+    ("Strikeouts", ["STRIKEOUTS", " KS", " K'S", " K "]),
+    ("Outs", ["OUTS", "OUTS RECORDED"]),
+    ("Hits Allowed", ["HITS ALLOWED", "HA"]),
+    ("Hits", [" HITS", " HIT "]),
+    ("Total Bases", ["TOTAL BASES", " TB"]),
+    ("Home Runs", ["HOME RUNS", " HR", "HOMER"]),
+    ("Earned Runs", ["EARNED RUNS", " ER"]),
+    ("HRR", [" HRR", "HITS RUNS RBI", "HITS+RUNS+RBI"]),
+    ("Moneyline", ["MONEYLINE", " ML"]),
+    ("Spread", ["SPREAD", " +", " -"]),
+    ("Team Total", ["TEAM TOTAL", " TT"]),
+    ("Total", ["TOTAL RUNS", "TOTAL POINTS", " OVER ", " UNDER "]),
+    ("SOG", ["SOG", "SHOTS ON GOAL"]),
+    ("SOT", ["SOT", "SHOT ON TARGET", "SHOTS ON TARGET"]),
+    ("Goals", ["GOALS", " GOAL"]),
+]
+
+
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def message_to_text(message: discord.Message) -> str:
+    parts: List[str] = []
+    if message.content:
+        parts.append(message.content)
+
+    # Webhook play posters often put the play in embeds, not message.content.
+    for embed in message.embeds:
+        if embed.title:
+            parts.append(str(embed.title))
+        if embed.description:
+            parts.append(str(embed.description))
+        for field in embed.fields:
+            if field.name:
+                parts.append(str(field.name))
+            if field.value:
+                parts.append(str(field.value))
+
+    return "\n".join(parts).strip()
+
 
 def infer_sport(text: str) -> str:
-    up = text.upper()
+    up = f" {text.upper()} "
     for code, keys in SPORT_KEYWORDS:
         for k in keys:
             if k in up:
                 return code
     return "UNKNOWN"
+
+
+def infer_league(text: str, sport: str) -> str:
+    up = f" {text.upper()} "
+    for league, keys in LEAGUE_KEYWORDS:
+        for k in keys:
+            if k in up:
+                return league
+    return sport if sport != "UNKNOWN" else ""
+
+
+def infer_sportsbook(text: str) -> str:
+    up = f" {text.upper()} "
+    for book, keys in SPORTSBOOK_KEYWORDS:
+        for k in keys:
+            if k in up:
+                return book
+    return ""
+
+
+def infer_bet_type(text: str) -> str:
+    up = f" {text.upper()} "
+    for bet_type, keys in BET_TYPE_RULES:
+        for k in keys:
+            if k in up:
+                return bet_type
+    return ""
 
 
 def parse_risk_units(text: str) -> Optional[float]:
@@ -279,6 +479,94 @@ def parse_odds_text(text: str) -> str:
     return ""
 
 
+def parse_multiplier_value(odds_text: str) -> Optional[float]:
+    if not odds_text.lower().endswith("x"):
+        return None
+    try:
+        return float(odds_text[:-1])
+    except Exception:
+        return None
+
+
+def infer_odds_format(odds_text: str) -> str:
+    if not odds_text:
+        return ""
+    if odds_text.lower().endswith("x"):
+        return "multiplier"
+    try:
+        int(odds_text)
+        return "american"
+    except Exception:
+        return ""
+
+
+def parse_line(text: str) -> str:
+    m = RE_LINE.search(text)
+    if not m:
+        return ""
+    return m.group(1)
+
+
+def parse_market(text: str) -> str:
+    clean = normalize_space(text)
+    # Remove leading stake so market text is cleaner.
+    clean = RE_UNITS.sub("", clean, count=1).strip(" -–—|:")
+    # Remove odds/multiplier from the market display.
+    clean = RE_AMERICAN_PAREN.sub("", clean)
+    clean = RE_MULT.sub("", clean)
+    clean = normalize_space(clean)
+    return clean[:250]
+
+
+def parse_player(text: str) -> str:
+    clean = normalize_space(text)
+    clean = RE_UNITS.sub("", clean, count=1).strip(" -–—|:")
+
+    # If this looks like a game/team total, avoid pretending the team/event is a player.
+    up = clean.upper()
+    if "/" in clean or " VS " in f" {up} " or "TEAM TOTAL" in up or "TOTAL RUNS" in up:
+        return ""
+    if "MONEYLINE" in up or " ML" in up or "SPREAD" in up:
+        return ""
+
+    m = re.search(
+        r"(?i)\b(?:over|under|o|u)\s*(?:\d|\.)|\b(?:to record|anytime|double double|triple double)\b",
+        clean,
+    )
+    if not m:
+        return ""
+
+    candidate = clean[:m.start()].strip(" -–—|:")
+    candidate = re.sub(r"(?i)\b(NBA|WNBA|MLB|NFL|NHL|NCAAB|CBB|SOCCER|TENNIS)\b", "", candidate)
+    candidate = normalize_space(candidate)
+
+    # Avoid storing huge text as player name.
+    if not candidate or len(candidate) > 60:
+        return ""
+    if len(candidate.split()) > 5:
+        return ""
+    return candidate
+
+
+def parse_analytics_fields(text: str, odds_text: str) -> Dict[str, object]:
+    sport = infer_sport(text)
+    multiplier = parse_multiplier_value(odds_text)
+    return {
+        "sport": sport,
+        "league": infer_league(text, sport),
+        "event": "",
+        "player": parse_player(text),
+        "team": "",
+        "opponent": "",
+        "bet_type": infer_bet_type(text),
+        "market": parse_market(text),
+        "line": parse_line(text),
+        "sportsbook": infer_sportsbook(text),
+        "odds_format": infer_odds_format(odds_text),
+        "multiplier": multiplier,
+    }
+
+
 def profit_from_american(risk: float, american: int) -> float:
     if american > 0:
         return risk * (american / 100.0)
@@ -286,6 +574,9 @@ def profit_from_american(risk: float, american: int) -> float:
 
 
 def profit_from_multiplier(risk: float, mult: float) -> float:
+    # Correct multiplier math:
+    # .25u at 3x returns .75u total, but profit is .50u.
+    # Net profit = risk * (multiplier - 1)
     return risk * (mult - 1.0)
 
 
@@ -303,7 +594,7 @@ def compute_net_units(risk: float, odds_text: str, result: str) -> float:
         try:
             mult = float(odds_text[:-1])
             if mult <= 1:
-                return risk
+                return 0.0
             return profit_from_multiplier(risk, mult)
         except Exception:
             return risk
@@ -313,6 +604,14 @@ def compute_net_units(risk: float, odds_text: str, result: str) -> float:
         return profit_from_american(risk, american)
     except Exception:
         return risk
+
+
+def emoji_to_result(emoji: str) -> str:
+    if emoji == WIN_EMOJI:
+        return "win"
+    if emoji == LOSS_EMOJI:
+        return "loss"
+    return "push"
 
 
 # =====================
@@ -357,7 +656,7 @@ def fetch_capper_rows(start_utc: datetime, end_utc: datetime) -> List[Tuple[str,
         """,
         (utc_iso(start_utc), utc_iso(end_utc)),
     ).fetchall()
-    return [(str(c), float(u), int(w), int(l), int(p)) for c, u, w, l, p in rows]
+    return [(str(c), float(u), int(w or 0), int(l or 0), int(p or 0)) for c, u, w, l, p in rows]
 
 
 def fetch_vip_totals(start_utc: datetime, end_utc: datetime) -> Tuple[float, int, int, int]:
@@ -413,6 +712,78 @@ async def post_period_summary(channel: discord.abc.Messageable, title: str, star
         await channel.send(file=discord.File(img, filename="units.png"))
 
 
+def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[int, float, float, int, int, int]:
+    row = cur.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total_bets,
+            COALESCE(SUM(risk_units), 0) AS risk_sum,
+            COALESCE(SUM(net_units), 0) AS net_sum,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes
+        FROM bets
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    if not row:
+        return 0, 0.0, 0.0, 0, 0, 0
+    return int(row[0] or 0), float(row[1] or 0.0), float(row[2] or 0.0), int(row[3] or 0), int(row[4] or 0), int(row[5] or 0)
+
+
+def fetch_recent_bets(where_sql: str, params: Tuple[object, ...], limit: int = 5) -> List[Tuple[str, str, str, float, float, str, str]]:
+    rows = cur.execute(
+        f"""
+        SELECT created_utc, capper, result, risk_units, net_units, market, jump_url
+        FROM bets
+        WHERE {where_sql}
+        ORDER BY created_utc DESC
+        LIMIT ?
+        """,
+        (*params, int(limit)),
+    ).fetchall()
+    return [
+        (str(created), str(capper), str(result), float(risk), float(net), str(market or ""), str(jump or ""))
+        for created, capper, result, risk, net, market, jump in rows
+    ]
+
+
+def build_filtered_summary_text(title: str, where_sql: str, params: Tuple[object, ...]) -> str:
+    total, risk, net, wins, losses, pushes = fetch_filtered_totals(where_sql, params)
+    graded = wins + losses
+    win_pct = (wins / graded * 100.0) if graded > 0 else 0.0
+    roi = (net / risk * 100.0) if risk > 0 else 0.0
+    record = f"{wins}-{losses}" + (f"-{pushes}" if pushes > 0 else "")
+
+    lines = [
+        f"📊 **{title}**",
+        f"Record: **{record}** ({win_pct:.1f}%)",
+        f"Net Units: **{net:+.2f}u**",
+        f"Risked: **{risk:.2f}u** | ROI: **{roi:.1f}%**",
+        f"Total Bets: **{total}**",
+    ]
+
+    recent = fetch_recent_bets(where_sql, params)
+    if recent:
+        lines.append("\n**Recent Bets**")
+        for created, capper, result, risk_units, net_units, market, jump_url in recent:
+            icon = "✅" if result == "win" else ("❌" if result == "loss" else "➖")
+            market_text = market if market else "Bet"
+            if len(market_text) > 90:
+                market_text = market_text[:87] + "..."
+            if jump_url:
+                lines.append(f"{icon} **{capper}** | {market_text} | {net_units:+.2f}u | [jump]({jump_url})")
+            else:
+                lines.append(f"{icon} **{capper}** | {market_text} | {net_units:+.2f}u")
+
+    return "\n".join(lines)
+
+
+async def post_filtered_summary(ctx: commands.Context, title: str, where_sql: str, params: Tuple[object, ...]) -> None:
+    await ctx.send(build_filtered_summary_text(title, where_sql, params))
+
+
 # =====================
 # PENDING + GRADING
 # =====================
@@ -424,7 +795,7 @@ async def safe_add_reaction(msg: discord.Message, emoji: str) -> None:
         return
 
 
-async def safe_remove_reaction(msg: discord.Message, emoji: str) -> None:
+async def safe_clear_reaction(msg: discord.Message, emoji: str) -> None:
     try:
         await msg.clear_reaction(emoji)
     except Exception:
@@ -439,19 +810,30 @@ def bet_exists(message_id: int) -> bool:
     return cur.execute("SELECT 1 FROM bets WHERE message_id = ?", (message_id,)).fetchone() is not None
 
 
-def insert_pending(message_id: int, channel_id: int, capper: Capper, content: str) -> bool:
+def insert_pending(
+    message_id: int,
+    channel_id: int,
+    capper: Capper,
+    content: str,
+    created_utc: str,
+    jump_url: str,
+) -> bool:
     risk = parse_risk_units(content)
     if risk is None:
         return False
 
-    sport = infer_sport(content)
     odds_text = parse_odds_text(content)
+    fields = parse_analytics_fields(content, odds_text)
 
     cur.execute(
         """
         INSERT OR REPLACE INTO pending
-        (message_id, channel_id, capper, capper_user_id, content, created_utc, sport, risk_units, odds_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (
+            message_id, channel_id, capper, capper_user_id, content, created_utc,
+            sport, risk_units, odds_text, jump_url, league, event, player, team,
+            opponent, bet_type, market, line, sportsbook, odds_format, multiplier
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message_id,
@@ -459,20 +841,35 @@ def insert_pending(message_id: int, channel_id: int, capper: Capper, content: st
             capper.name,
             capper.user_id,
             content,
-            utc_iso(datetime.now(timezone.utc)),
-            sport,
+            created_utc,
+            str(fields["sport"]),
             float(risk),
             odds_text,
+            jump_url,
+            str(fields["league"]),
+            str(fields["event"]),
+            str(fields["player"]),
+            str(fields["team"]),
+            str(fields["opponent"]),
+            str(fields["bet_type"]),
+            str(fields["market"]),
+            str(fields["line"]),
+            str(fields["sportsbook"]),
+            str(fields["odds_format"]),
+            fields["multiplier"],
         ),
     )
     conn.commit()
     return True
 
 
-def grade_pending(message_id: int, result: str) -> bool:
+def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
     row = cur.execute(
         """
-        SELECT channel_id, capper, capper_user_id, content, sport, risk_units, odds_text, created_utc
+        SELECT
+            channel_id, capper, capper_user_id, content, sport, risk_units, odds_text,
+            created_utc, jump_url, league, event, player, team, opponent, bet_type,
+            market, line, sportsbook, odds_format, multiplier
         FROM pending
         WHERE message_id = ?
         """,
@@ -482,14 +879,54 @@ def grade_pending(message_id: int, result: str) -> bool:
     if not row:
         return False
 
-    channel_id, capper_name, capper_user_id, content, sport, risk, odds_text, created_utc = row
+    (
+        channel_id,
+        capper_name,
+        capper_user_id,
+        content,
+        sport,
+        risk,
+        odds_text,
+        created_utc,
+        jump_url,
+        league,
+        event,
+        player,
+        team,
+        opponent,
+        bet_type,
+        market,
+        line,
+        sportsbook,
+        odds_format,
+        multiplier,
+    ) = row
+
+    # Older pending rows may not have parsed fields yet. Re-parse from content if needed.
+    if content and (not sport or sport == "UNKNOWN" or not bet_type or not market):
+        fields = parse_analytics_fields(str(content), str(odds_text))
+        sport = sport if sport and sport != "UNKNOWN" else str(fields["sport"])
+        league = league or str(fields["league"])
+        player = player or str(fields["player"])
+        bet_type = bet_type or str(fields["bet_type"])
+        market = market or str(fields["market"])
+        line = line or str(fields["line"])
+        sportsbook = sportsbook or str(fields["sportsbook"])
+        odds_format = odds_format or str(fields["odds_format"])
+        multiplier = multiplier if multiplier is not None else fields["multiplier"]
+
     net = compute_net_units(float(risk), str(odds_text), result)
 
     cur.execute(
         """
         INSERT OR REPLACE INTO bets
-        (message_id, channel_id, capper, capper_user_id, sport, risk_units, net_units, result, odds_text, created_utc, graded_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (
+            message_id, channel_id, capper, capper_user_id, sport, risk_units,
+            net_units, result, odds_text, created_utc, graded_utc, content,
+            jump_url, league, event, player, team, opponent, bet_type, market,
+            line, sportsbook, odds_format, multiplier, grade_reaction
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
@@ -503,6 +940,20 @@ def grade_pending(message_id: int, result: str) -> bool:
             str(odds_text),
             str(created_utc),
             utc_iso(datetime.now(timezone.utc)),
+            str(content or ""),
+            str(jump_url or ""),
+            str(league or ""),
+            str(event or ""),
+            str(player or ""),
+            str(team or ""),
+            str(opponent or ""),
+            str(bet_type or ""),
+            str(market or ""),
+            str(line or ""),
+            str(sportsbook or ""),
+            str(odds_format or ""),
+            multiplier,
+            str(grade_reaction),
         ),
     )
     cur.execute("DELETE FROM pending WHERE message_id = ?", (message_id,))
@@ -510,10 +961,10 @@ def grade_pending(message_id: int, result: str) -> bool:
     return True
 
 
-def ungrade_bet(message_id: int) -> bool:
+def regrade_bet(message_id: int, result: str, grade_reaction: str) -> bool:
     row = cur.execute(
         """
-        SELECT channel_id, capper, capper_user_id, sport, risk_units, odds_text
+        SELECT risk_units, odds_text
         FROM bets
         WHERE message_id = ?
         """,
@@ -523,31 +974,112 @@ def ungrade_bet(message_id: int) -> bool:
     if not row:
         return False
 
-    channel_id, capper_name, capper_user_id, sport, risk, odds_text = row
+    risk, odds_text = row
+    net = compute_net_units(float(risk), str(odds_text), result)
 
-    placeholder = f"{sport} {risk}u {odds_text}".strip()
+    cur.execute(
+        """
+        UPDATE bets
+        SET result = ?, net_units = ?, graded_utc = ?, grade_reaction = ?
+        WHERE message_id = ?
+        """,
+        (str(result), float(net), utc_iso(datetime.now(timezone.utc)), str(grade_reaction), int(message_id)),
+    )
+    conn.commit()
+    return True
+
+
+def ungrade_bet(message_id: int) -> bool:
+    row = cur.execute(
+        """
+        SELECT
+            channel_id, capper, capper_user_id, content, sport, risk_units,
+            odds_text, created_utc, jump_url, league, event, player, team,
+            opponent, bet_type, market, line, sportsbook, odds_format, multiplier
+        FROM bets
+        WHERE message_id = ?
+        """,
+        (message_id,),
+    ).fetchone()
+
+    if not row:
+        return False
+
+    (
+        channel_id,
+        capper_name,
+        capper_user_id,
+        content,
+        sport,
+        risk,
+        odds_text,
+        created_utc,
+        jump_url,
+        league,
+        event,
+        player,
+        team,
+        opponent,
+        bet_type,
+        market,
+        line,
+        sportsbook,
+        odds_format,
+        multiplier,
+    ) = row
 
     cur.execute("DELETE FROM bets WHERE message_id = ?", (message_id,))
     cur.execute(
         """
         INSERT OR REPLACE INTO pending
-        (message_id, channel_id, capper, capper_user_id, content, created_utc, sport, risk_units, odds_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (
+            message_id, channel_id, capper, capper_user_id, content, created_utc,
+            sport, risk_units, odds_text, jump_url, league, event, player, team,
+            opponent, bet_type, market, line, sportsbook, odds_format, multiplier
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
             int(channel_id),
             str(capper_name),
             int(capper_user_id),
-            placeholder,
-            utc_iso(datetime.now(timezone.utc)),
+            str(content or ""),
+            str(created_utc),
             str(sport),
             float(risk),
             str(odds_text),
+            str(jump_url or ""),
+            str(league or ""),
+            str(event or ""),
+            str(player or ""),
+            str(team or ""),
+            str(opponent or ""),
+            str(bet_type or ""),
+            str(market or ""),
+            str(line or ""),
+            str(sportsbook or ""),
+            str(odds_format or ""),
+            multiplier,
         ),
     )
     conn.commit()
     return True
+
+
+async def find_remaining_capper_grade(msg: discord.Message, capper_user_id: int) -> Optional[str]:
+    """After a reaction is removed, check whether the capper still has another grade reaction on the message."""
+    for reaction in msg.reactions:
+        emoji = str(reaction.emoji)
+        if emoji not in GRADE_EMOJIS:
+            continue
+        try:
+            async for user in reaction.users(limit=None):
+                if user.id == capper_user_id:
+                    return emoji
+        except Exception:
+            continue
+    return None
 
 
 # =====================
@@ -591,7 +1123,15 @@ async def on_message(message: discord.Message) -> None:
         await bot.process_commands(message)
         return
 
-    ok = insert_pending(message.id, message.channel.id, capper, message.content or "")
+    content = message_to_text(message)
+    ok = insert_pending(
+        message.id,
+        message.channel.id,
+        capper,
+        content,
+        utc_iso(message.created_at),
+        message.jump_url,
+    )
     if ok:
         await safe_add_reaction(message, PENDING_REACTION)
 
@@ -618,9 +1158,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     if payload.user_id != capper.user_id:
         return
 
-    if not pending_exists(payload.message_id):
-        return
-
     channel = bot.get_channel(payload.channel_id)
     if channel is None:
         return
@@ -630,11 +1167,19 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     except Exception:
         return
 
-    result = "win" if emoji == WIN_EMOJI else ("loss" if emoji == LOSS_EMOJI else "push")
-    if not grade_pending(payload.message_id, result):
+    result = emoji_to_result(emoji)
+
+    if pending_exists(payload.message_id):
+        if not grade_pending(payload.message_id, result, emoji):
+            return
+    elif bet_exists(payload.message_id):
+        # Allows direct regrading if the capper adds a different grade reaction later.
+        if not regrade_bet(payload.message_id, result, emoji):
+            return
+    else:
         return
 
-    await safe_remove_reaction(msg, PENDING_REACTION)
+    await safe_clear_reaction(msg, PENDING_REACTION)
     await safe_add_reaction(msg, LOGGED_REACTION)
 
 
@@ -666,10 +1211,18 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> Non
     except Exception:
         return
 
+    remaining_grade = await find_remaining_capper_grade(msg, capper.user_id)
+    if remaining_grade:
+        # If another grade reaction is still present, treat this as a regrade instead of an ungrade.
+        result = emoji_to_result(remaining_grade)
+        if regrade_bet(payload.message_id, result, remaining_grade):
+            await safe_add_reaction(msg, LOGGED_REACTION)
+        return
+
     if not ungrade_bet(payload.message_id):
         return
 
-    await safe_remove_reaction(msg, LOGGED_REACTION)
+    await safe_clear_reaction(msg, LOGGED_REACTION)
     await safe_add_reaction(msg, PENDING_REACTION)
 
 
@@ -711,6 +1264,183 @@ async def alltime(ctx: commands.Context) -> None:
     start_l = datetime(2000, 1, 1, 0, 0, 0, tzinfo=_tz())
     end_l = now_local() + timedelta(days=1)
     await post_period_summary(ctx, "All-Time", start_l, end_l)
+
+
+@bot.command(name="pending")
+async def pending_cmd(ctx: commands.Context) -> None:
+    rows = cur.execute(
+        """
+        SELECT capper, COUNT(*)
+        FROM pending
+        GROUP BY capper
+        ORDER BY COUNT(*) DESC
+        """
+    ).fetchall()
+
+    total = sum(int(count or 0) for _, count in rows)
+    if not rows:
+        await ctx.send("📝 **Pending Bets:** 0")
+        return
+
+    lines = [f"📝 **Pending Bets:** {total}"]
+    for capper_name, count in rows:
+        lines.append(f"**{capper_name}**: {int(count)}")
+    await ctx.send("\n".join(lines))
+
+
+@bot.command(name="recalc_multipliers", aliases=["recalcmultipliers", "fixmultipliers", "fix_multipliers"])
+@commands.has_permissions(manage_guild=True)
+async def recalc_multipliers_cmd(ctx: commands.Context) -> None:
+    rows = cur.execute(
+        """
+        SELECT id, risk_units, odds_text, net_units
+        FROM bets
+        WHERE result = 'win' AND LOWER(odds_text) LIKE '%x%'
+        """
+    ).fetchall()
+
+    checked = 0
+    updated = 0
+    old_total = 0.0
+    new_total = 0.0
+
+    for bet_id, risk_units, odds_text, old_net in rows:
+        checked += 1
+        mult = parse_multiplier_value(str(odds_text))
+        if mult is None:
+            continue
+        new_net = compute_net_units(float(risk_units), str(odds_text), "win")
+        old_net_f = float(old_net or 0.0)
+        old_total += old_net_f
+        new_total += new_net
+        if abs(new_net - old_net_f) > 0.0001:
+            cur.execute("UPDATE bets SET net_units = ? WHERE id = ?", (float(new_net), int(bet_id)))
+            updated += 1
+
+    conn.commit()
+    await ctx.send(
+        "✅ **Multiplier Recalc Complete**\n"
+        f"Checked: **{checked}** multiplier wins\n"
+        f"Updated: **{updated}** rows\n"
+        f"Old total: **{old_total:+.2f}u**\n"
+        f"New total: **{new_total:+.2f}u**"
+    )
+
+
+@bot.command(name="sport")
+async def sport_cmd(ctx: commands.Context, *, sport_name: str) -> None:
+    value = sport_name.strip().upper()
+    await post_filtered_summary(ctx, f"Sport: {value}", "UPPER(sport) = ?", (value,))
+
+
+@bot.command(name="league")
+async def league_cmd(ctx: commands.Context, *, league_name: str) -> None:
+    value = league_name.strip().lower()
+    await post_filtered_summary(ctx, f"League: {league_name.strip()}", "LOWER(league) = ?", (value,))
+
+
+@bot.command(name="capper")
+async def capper_cmd(ctx: commands.Context, *, capper_name: str) -> None:
+    value = capper_name.strip().lower()
+    await post_filtered_summary(ctx, f"Capper: {capper_name.strip()}", "LOWER(capper) = ?", (value,))
+
+
+@bot.command(name="player")
+async def player_cmd(ctx: commands.Context, *, player_name: str) -> None:
+    value = f"%{player_name.strip().lower()}%"
+    await post_filtered_summary(
+        ctx,
+        f"Player Search: {player_name.strip()}",
+        "LOWER(player) LIKE ? OR LOWER(content) LIKE ?",
+        (value, value),
+    )
+
+
+@bot.command(name="bettype")
+async def bettype_cmd(ctx: commands.Context, *, bet_type: str) -> None:
+    value = f"%{bet_type.strip().lower()}%"
+    await post_filtered_summary(
+        ctx,
+        f"Bet Type: {bet_type.strip()}",
+        "LOWER(bet_type) LIKE ? OR LOWER(content) LIKE ?",
+        (value, value),
+    )
+
+
+@bot.command(name="month")
+async def month_cmd(ctx: commands.Context, ym: str) -> None:
+    try:
+        start = datetime.strptime(ym.strip(), "%Y-%m").date().replace(day=1)
+    except Exception:
+        await ctx.send("Use format: `bt!month 2026-07`")
+        return
+
+    start_l = datetime(start.year, start.month, 1, 0, 0, 0, tzinfo=_tz())
+    if start.month == 12:
+        end_l = datetime(start.year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
+    else:
+        end_l = datetime(start.year, start.month + 1, 1, 0, 0, 0, tzinfo=_tz())
+
+    await post_filtered_summary(
+        ctx,
+        f"Month: {ym.strip()}",
+        "created_utc >= ? AND created_utc < ?",
+        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
+    )
+
+
+@bot.command(name="year")
+async def year_cmd(ctx: commands.Context, yyyy: str) -> None:
+    try:
+        year = int(yyyy.strip())
+    except Exception:
+        await ctx.send("Use format: `bt!year 2026`")
+        return
+
+    start_l = datetime(year, 1, 1, 0, 0, 0, tzinfo=_tz())
+    end_l = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=_tz())
+
+    await post_filtered_summary(
+        ctx,
+        f"Year: {year}",
+        "created_utc >= ? AND created_utc < ?",
+        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
+    )
+
+
+@bot.command(name="range")
+async def range_cmd(ctx: commands.Context, start_date: str, end_date: str) -> None:
+    start_d = parse_date_yyyy_mm_dd(start_date)
+    end_d = parse_date_yyyy_mm_dd(end_date)
+    if not start_d or not end_d:
+        await ctx.send("Use format: `bt!range 2026-07-01 2026-07-31`")
+        return
+
+    start_l = datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=_tz())
+    # Inclusive end date for user convenience.
+    end_l = datetime(end_d.year, end_d.month, end_d.day, 0, 0, 0, tzinfo=_tz()) + timedelta(days=1)
+
+    await post_filtered_summary(
+        ctx,
+        f"Range: {start_date} → {end_date}",
+        "created_utc >= ? AND created_utc < ?",
+        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
+    )
+
+
+# =====================
+# COMMAND ERRORS
+# =====================
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need the **Manage Server** permission to run that command.")
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Missing argument. Example commands: `bt!sport WNBA`, `bt!player Paige Bueckers`, `bt!month 2026-07`")
+        return
+    raise error
 
 
 # =====================

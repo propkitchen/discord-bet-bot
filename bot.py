@@ -172,6 +172,80 @@ def parse_date_yyyy_mm_dd(value: str) -> Optional[date]:
         return None
 
 
+def local_date_from_utc_iso(value: str) -> date:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_tz()).date()
+    except Exception:
+        return now_local().date()
+
+
+def parse_bet_date(text: str, created_utc: str = "") -> str:
+    """
+    Return YYYY-MM-DD for the intended game/result date when the capper includes it.
+
+    This fixes late-night posts like:
+    MLB Prop #1 (7/10) posted at 11:42 PM on 7/9.
+
+    If no clear date is written in the post, return blank and let grading time decide.
+    """
+    clean = text or ""
+    base_day = local_date_from_utc_iso(created_utc) if created_utc else now_local().date()
+
+    # Explicit ISO date wins, e.g. 2026-07-10.
+    for m in RE_ISO_DATE.finditer(clean):
+        d = parse_date_yyyy_mm_dd(m.group(1))
+        if d:
+            return d.isoformat()
+
+    candidates: List[date] = []
+    for m in RE_SLASH_DATE.finditer(clean):
+        try:
+            month = int(m.group(1))
+            day = int(m.group(2))
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                continue
+
+            raw_year = m.group(3)
+            if raw_year:
+                year = int(raw_year)
+                if year < 100:
+                    year += 2000
+                candidates.append(date(year, month, day))
+                continue
+
+            # No year written: choose the year closest to the message date.
+            possible: List[date] = []
+            for year in (base_day.year - 1, base_day.year, base_day.year + 1):
+                try:
+                    possible.append(date(year, month, day))
+                except ValueError:
+                    pass
+            if possible:
+                candidates.append(min(possible, key=lambda d: abs((d - base_day).days)))
+        except Exception:
+            continue
+
+    # Avoid accidentally using stat text like 5/5 unless it is close to the posted date.
+    close_candidates = [d for d in candidates if abs((d - base_day).days) <= 45]
+    if close_candidates:
+        return min(close_candidates, key=lambda d: abs((d - base_day).days)).isoformat()
+
+    return ""
+
+
+def bet_date_for_grade(content: str, created_utc: str, existing_bet_date: str = "") -> str:
+    explicit = parse_bet_date(content, created_utc)
+    if explicit:
+        return explicit
+    if existing_bet_date:
+        return str(existing_bet_date)
+    # No written game date: use the day it was graded/resulted in ET.
+    return now_local().date().isoformat()
+
+
 # =====================
 # DATABASE
 # =====================
@@ -208,6 +282,7 @@ def ensure_schema() -> None:
             capper_user_id INTEGER NOT NULL,
             content TEXT NOT NULL,
             created_utc TEXT NOT NULL,
+            bet_date TEXT NOT NULL DEFAULT '',
             sport TEXT NOT NULL,
             risk_units REAL NOT NULL,
             odds_text TEXT NOT NULL,
@@ -242,6 +317,7 @@ def ensure_schema() -> None:
             odds_text TEXT NOT NULL,
             created_utc TEXT NOT NULL,
             graded_utc TEXT NOT NULL,
+            bet_date TEXT NOT NULL DEFAULT '',
             content TEXT NOT NULL DEFAULT '',
             jump_url TEXT NOT NULL DEFAULT '',
             league TEXT NOT NULL DEFAULT '',
@@ -262,6 +338,7 @@ def ensure_schema() -> None:
 
     # Safe migrations for existing Render database.
     pending_columns = {
+        "bet_date": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
         "league": "TEXT NOT NULL DEFAULT ''",
         "event": "TEXT NOT NULL DEFAULT ''",
@@ -279,6 +356,7 @@ def ensure_schema() -> None:
         add_column_if_missing("pending", col, definition)
 
     bet_columns = {
+        "bet_date": "TEXT NOT NULL DEFAULT ''",
         "content": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
         "league": "TEXT NOT NULL DEFAULT ''",
@@ -299,6 +377,7 @@ def ensure_schema() -> None:
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_graded_utc ON bets(graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_created_utc ON bets(created_utc);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_bet_date ON bets(bet_date);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_capper_time ON bets(capper, graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_sport_time ON bets(sport, graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_league_time ON bets(league, graded_utc);")
@@ -319,6 +398,8 @@ RE_AMERICAN_PAREN = re.compile(r"(?i)\(([-+]\d{2,5})(?:\s+[A-Za-z ]+)?\)")
 RE_AMERICAN = re.compile(r"(?i)\b([-+]\d{2,5})\b")
 RE_MULT = re.compile(r"(?i)(?<![\w.])((?:\d+(?:\.\d+)?|\.\d+))\s*x\b")
 RE_LINE = re.compile(r"(?i)\b(?:over|under|o|u)\s*((?:\d+(?:\.\d+)?|\.\d+))\b")
+RE_ISO_DATE = re.compile(r"(?<!\d)(20\d{2}-\d{1,2}-\d{1,2})(?!\d)")
+RE_SLASH_DATE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)")
 
 SPORT_KEYWORDS = [
     ("NCAAB", ["NCAAB", "CBB", "COLLEGE BASKETBALL"]),
@@ -641,9 +722,27 @@ def generate_units_chart(title: str, rows: List[Tuple[str, float, int, int, int]
 # REPORTING
 # =====================
 
-def fetch_capper_rows(start_utc: datetime, end_utc: datetime) -> List[Tuple[str, float, int, int, int]]:
+def date_window_where(start_local: datetime, end_local: datetime) -> Tuple[str, Tuple[object, ...]]:
+    """
+    Filter by intended bet/result date.
+
+    New rows use bets.bet_date, which can come from text like (7/10).
+    Older rows without bet_date fall back to graded_utc.
+    """
+    start_date = start_local.date().isoformat()
+    end_date = end_local.date().isoformat()
+    start_utc = utc_iso(to_utc(start_local))
+    end_utc = utc_iso(to_utc(end_local))
+    return (
+        "((bet_date >= ? AND bet_date < ?) OR ((bet_date IS NULL OR bet_date = '') AND graded_utc >= ? AND graded_utc < ?))",
+        (start_date, end_date, start_utc, end_utc),
+    )
+
+
+def fetch_capper_rows(start_local: datetime, end_local: datetime) -> List[Tuple[str, float, int, int, int]]:
+    where_sql, params = date_window_where(start_local, end_local)
     rows = cur.execute(
-        """
+        f"""
         SELECT
             capper,
             COALESCE(SUM(net_units), 0) AS net_units_sum,
@@ -651,27 +750,28 @@ def fetch_capper_rows(start_utc: datetime, end_utc: datetime) -> List[Tuple[str,
             SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
             SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes
         FROM bets
-        WHERE graded_utc >= ? AND graded_utc < ?
+        WHERE {where_sql}
         GROUP BY capper
         ORDER BY net_units_sum DESC
         """,
-        (utc_iso(start_utc), utc_iso(end_utc)),
+        params,
     ).fetchall()
     return [(str(c), float(u), int(w or 0), int(l or 0), int(p or 0)) for c, u, w, l, p in rows]
 
 
-def fetch_vip_totals(start_utc: datetime, end_utc: datetime) -> Tuple[float, int, int, int]:
+def fetch_vip_totals(start_local: datetime, end_local: datetime) -> Tuple[float, int, int, int]:
+    where_sql, params = date_window_where(start_local, end_local)
     row = cur.execute(
-        """
+        f"""
         SELECT
             COALESCE(SUM(net_units), 0) AS net_units_sum,
             SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
             SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
             SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes
         FROM bets
-        WHERE graded_utc >= ? AND graded_utc < ?
+        WHERE {where_sql}
         """,
-        (utc_iso(start_utc), utc_iso(end_utc)),
+        params,
     ).fetchone()
     if not row:
         return 0.0, 0, 0, 0
@@ -698,11 +798,8 @@ def make_vip_line(net_units: float, wins: int, losses: int, pushes: int) -> str:
 
 
 async def post_period_summary(channel: discord.abc.Messageable, title: str, start_local: datetime, end_local: datetime) -> None:
-    start_utc = to_utc(start_local)
-    end_utc = to_utc(end_local)
-
-    rows = fetch_capper_rows(start_utc, end_utc)
-    vip_net, vip_w, vip_l, vip_p = fetch_vip_totals(start_utc, end_utc)
+    rows = fetch_capper_rows(start_local, end_local)
+    vip_net, vip_w, vip_l, vip_p = fetch_vip_totals(start_local, end_local)
 
     await channel.send(
         f"📊 **{title}**\n{make_vip_line(vip_net, vip_w, vip_l, vip_p)}\n\n{make_rows_text(rows)}"
@@ -736,10 +833,10 @@ def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[i
 def fetch_recent_bets(where_sql: str, params: Tuple[object, ...], limit: int = 5) -> List[Tuple[str, str, str, float, float, str, str, str]]:
     rows = cur.execute(
         f"""
-        SELECT created_utc, capper, result, risk_units, net_units, content, market, jump_url
+        SELECT graded_utc, capper, result, risk_units, net_units, content, market, jump_url
         FROM bets
         WHERE {where_sql}
-        ORDER BY created_utc DESC
+        ORDER BY graded_utc DESC
         LIMIT ?
         """,
         (*params, int(limit)),
@@ -980,8 +1077,9 @@ def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Opti
 def add_time_filter(where_parts: List[str], params: List[object], start_l: Optional[datetime], end_l: Optional[datetime]) -> None:
     if start_l is None or end_l is None:
         return
-    where_parts.append("created_utc >= ? AND created_utc < ?")
-    params.extend([utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))])
+    where_sql, date_params = date_window_where(start_l, end_l)
+    where_parts.append(where_sql)
+    params.extend(date_params)
 
 
 def build_where(where_parts: List[str], params: List[object]) -> Tuple[str, Tuple[object, ...]]:
@@ -1047,16 +1145,17 @@ def insert_pending(
 
     odds_text = parse_odds_text(content)
     fields = parse_analytics_fields(content, odds_text)
+    bet_date = parse_bet_date(content, created_utc)
 
     cur.execute(
         """
         INSERT OR REPLACE INTO pending
         (
-            message_id, channel_id, capper, capper_user_id, content, created_utc,
+            message_id, channel_id, capper, capper_user_id, content, created_utc, bet_date,
             sport, risk_units, odds_text, jump_url, league, event, player, team,
             opponent, bet_type, market, line, sportsbook, odds_format, multiplier
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message_id,
@@ -1065,6 +1164,7 @@ def insert_pending(
             capper.user_id,
             content,
             created_utc,
+            bet_date,
             str(fields["sport"]),
             float(risk),
             odds_text,
@@ -1091,7 +1191,7 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
         """
         SELECT
             channel_id, capper, capper_user_id, content, sport, risk_units, odds_text,
-            created_utc, jump_url, league, event, player, team, opponent, bet_type,
+            created_utc, bet_date, jump_url, league, event, player, team, opponent, bet_type,
             market, line, sportsbook, odds_format, multiplier
         FROM pending
         WHERE message_id = ?
@@ -1111,6 +1211,7 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
         risk,
         odds_text,
         created_utc,
+        bet_date,
         jump_url,
         league,
         event,
@@ -1144,6 +1245,7 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
     if parsed_risk is not None:
         risk = float(parsed_risk)
 
+    bet_date = bet_date_for_grade(str(content or ""), str(created_utc), str(bet_date or ""))
     net = compute_net_units(float(risk), str(odds_text), result)
 
     cur.execute(
@@ -1151,11 +1253,11 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
         INSERT OR REPLACE INTO bets
         (
             message_id, channel_id, capper, capper_user_id, sport, risk_units,
-            net_units, result, odds_text, created_utc, graded_utc, content,
+            net_units, result, odds_text, created_utc, graded_utc, bet_date, content,
             jump_url, league, event, player, team, opponent, bet_type, market,
             line, sportsbook, odds_format, multiplier, grade_reaction
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
@@ -1169,6 +1271,7 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
             str(odds_text),
             str(created_utc),
             utc_iso(datetime.now(timezone.utc)),
+            str(bet_date or ""),
             str(content or ""),
             str(jump_url or ""),
             str(league or ""),
@@ -1193,7 +1296,7 @@ def grade_pending(message_id: int, result: str, grade_reaction: str) -> bool:
 def regrade_bet(message_id: int, result: str, grade_reaction: str) -> bool:
     row = cur.execute(
         """
-        SELECT risk_units, odds_text
+        SELECT risk_units, odds_text, content, created_utc, bet_date
         FROM bets
         WHERE message_id = ?
         """,
@@ -1203,16 +1306,24 @@ def regrade_bet(message_id: int, result: str, grade_reaction: str) -> bool:
     if not row:
         return False
 
-    risk, odds_text = row
+    risk, odds_text, content, created_utc, existing_bet_date = row
+    bet_date = bet_date_for_grade(str(content or ""), str(created_utc or ""), str(existing_bet_date or ""))
     net = compute_net_units(float(risk), str(odds_text), result)
 
     cur.execute(
         """
         UPDATE bets
-        SET result = ?, net_units = ?, graded_utc = ?, grade_reaction = ?
+        SET result = ?, net_units = ?, graded_utc = ?, bet_date = ?, grade_reaction = ?
         WHERE message_id = ?
         """,
-        (str(result), float(net), utc_iso(datetime.now(timezone.utc)), str(grade_reaction), int(message_id)),
+        (
+            str(result),
+            float(net),
+            utc_iso(datetime.now(timezone.utc)),
+            str(bet_date or ""),
+            str(grade_reaction),
+            int(message_id),
+        ),
     )
     conn.commit()
     return True
@@ -1223,7 +1334,7 @@ def ungrade_bet(message_id: int) -> bool:
         """
         SELECT
             channel_id, capper, capper_user_id, content, sport, risk_units,
-            odds_text, created_utc, jump_url, league, event, player, team,
+            odds_text, created_utc, bet_date, jump_url, league, event, player, team,
             opponent, bet_type, market, line, sportsbook, odds_format, multiplier
         FROM bets
         WHERE message_id = ?
@@ -1243,6 +1354,7 @@ def ungrade_bet(message_id: int) -> bool:
         risk,
         odds_text,
         created_utc,
+        bet_date,
         jump_url,
         league,
         event,
@@ -1262,11 +1374,11 @@ def ungrade_bet(message_id: int) -> bool:
         """
         INSERT OR REPLACE INTO pending
         (
-            message_id, channel_id, capper, capper_user_id, content, created_utc,
+            message_id, channel_id, capper, capper_user_id, content, created_utc, bet_date,
             sport, risk_units, odds_text, jump_url, league, event, player, team,
             opponent, bet_type, market, line, sportsbook, odds_format, multiplier
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
@@ -1275,6 +1387,7 @@ def ungrade_bet(message_id: int) -> bool:
             int(capper_user_id),
             str(content or ""),
             str(created_utc),
+            str(bet_date or ""),
             str(sport),
             float(risk),
             str(odds_text),
@@ -1627,7 +1740,12 @@ async def clear_pending_old_cmd(ctx: commands.Context) -> None:
     today = now_local().date()
     start_today, _end_today = local_day_bounds(today)
     cutoff_utc = utc_iso(to_utc(start_today))
-    await clear_pending_rows(ctx, "created_utc < ?", (cutoff_utc,), f"Before Today ({today.isoformat()})")
+    await clear_pending_rows(
+        ctx,
+        "((bet_date IS NOT NULL AND bet_date != '' AND bet_date < ?) OR ((bet_date IS NULL OR bet_date = '') AND created_utc < ?))",
+        (today.isoformat(), cutoff_utc),
+        f"Before Today ({today.isoformat()})",
+    )
 
 
 @bot.command(name="clear_pending_before")
@@ -1639,7 +1757,13 @@ async def clear_pending_before_cmd(ctx: commands.Context, *, cutoff: str) -> Non
         return
 
     cutoff_utc = utc_iso(to_utc(start_l))
-    await clear_pending_rows(ctx, "created_utc < ?", (cutoff_utc,), f"Before {label}")
+    cutoff_date = start_l.date().isoformat()
+    await clear_pending_rows(
+        ctx,
+        "((bet_date IS NOT NULL AND bet_date != '' AND bet_date < ?) OR ((bet_date IS NULL OR bet_date = '') AND created_utc < ?))",
+        (cutoff_date, cutoff_utc),
+        f"Before {label}",
+    )
 
 
 @bot.command(name="fix_decimal_units", aliases=["fixdecimals", "fix_decimal", "fixunits", "fix_units"])
@@ -1716,6 +1840,64 @@ async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
     )
 
 
+@bot.command(name="fix_bet_dates", aliases=["fixbetdates", "backfill_bet_dates", "fix_dates"])
+@commands.has_permissions(manage_guild=True)
+async def fix_bet_dates_cmd(ctx: commands.Context) -> None:
+    """Backfill intended bet dates from post text like (7/10), falling back to graded date."""
+
+    checked_bets = 0
+    updated_bets = 0
+    explicit_bet_dates = 0
+    fallback_bet_dates = 0
+
+    bet_rows = cur.execute(
+        """
+        SELECT id, content, created_utc, graded_utc, bet_date
+        FROM bets
+        """
+    ).fetchall()
+
+    for bet_id, content, created_utc, graded_utc, old_bet_date in bet_rows:
+        checked_bets += 1
+        explicit = parse_bet_date(str(content or ""), str(created_utc or ""))
+        if explicit:
+            new_bet_date = explicit
+            explicit_bet_dates += 1
+        else:
+            new_bet_date = local_date_from_utc_iso(str(graded_utc or created_utc or "" )).isoformat()
+            fallback_bet_dates += 1
+
+        if str(old_bet_date or "") != new_bet_date:
+            cur.execute("UPDATE bets SET bet_date = ? WHERE id = ?", (new_bet_date, int(bet_id)))
+            updated_bets += 1
+
+    checked_pending = 0
+    updated_pending = 0
+    pending_rows = cur.execute(
+        """
+        SELECT message_id, content, created_utc, bet_date
+        FROM pending
+        """
+    ).fetchall()
+
+    for message_id, content, created_utc, old_bet_date in pending_rows:
+        checked_pending += 1
+        explicit = parse_bet_date(str(content or ""), str(created_utc or ""))
+        if explicit and str(old_bet_date or "") != explicit:
+            cur.execute("UPDATE pending SET bet_date = ? WHERE message_id = ?", (explicit, int(message_id)))
+            updated_pending += 1
+
+    conn.commit()
+
+    await ctx.send(
+        "✅ **Bet Date Fix Complete**\n"
+        "This lets posts like `MLB Prop #1 (7/10)` count toward 7/10, even if posted the night before.\n"
+        f"Checked graded bets: **{checked_bets}** | Updated: **{updated_bets}**\n"
+        f"Explicit dates found: **{explicit_bet_dates}** | Fallback to graded date: **{fallback_bet_dates}**\n"
+        f"Checked pending bets: **{checked_pending}** | Updated pending: **{updated_pending}**"
+    )
+
+
 @bot.command(name="recalc_multipliers", aliases=["recalcmultipliers", "fixmultipliers", "fix_multipliers"])
 @commands.has_permissions(manage_guild=True)
 async def recalc_multipliers_cmd(ctx: commands.Context) -> None:
@@ -1787,11 +1969,12 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
             continue
         odds_text = parse_odds_text(content)
         fields = parse_analytics_fields(content, odds_text)
+        bet_date = parse_bet_date(content, msg.created_at.isoformat())
         cur.execute(
             """
             UPDATE bets
             SET content = ?, market = ?, player = ?, bet_type = ?, league = ?, sport = ?,
-                line = ?, sportsbook = ?, odds_format = ?, multiplier = ?
+                line = ?, sportsbook = ?, odds_format = ?, multiplier = ?, bet_date = COALESCE(NULLIF(?, ''), bet_date)
             WHERE id = ?
             """,
             (
@@ -1805,6 +1988,7 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
                 str(fields["sportsbook"]),
                 str(fields["odds_format"]),
                 fields["multiplier"],
+                bet_date,
                 int(bet_id),
             ),
         )
@@ -1901,11 +2085,12 @@ async def range_cmd(ctx: commands.Context, start_date: str, end_date: str) -> No
     # Inclusive end date for user convenience.
     end_l = datetime(end_d.year, end_d.month, end_d.day, 0, 0, 0, tzinfo=_tz()) + timedelta(days=1)
 
+    where_sql, params = date_window_where(start_l, end_l)
     await post_filtered_summary(
         ctx,
         f"Range: {start_date} → {end_date}",
-        "created_utc >= ? AND created_utc < ?",
-        (utc_iso(to_utc(start_l)), utc_iso(to_utc(end_l))),
+        where_sql,
+        params,
     )
 
 

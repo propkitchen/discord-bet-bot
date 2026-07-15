@@ -394,9 +394,11 @@ ensure_schema()
 # =====================
 
 RE_UNITS = re.compile(r"(?i)(?<![\w.])((?:\d+(?:\.\d+)?|\.\d+))\s*u\b")
-RE_AMERICAN_PAREN = re.compile(r"(?i)\(([-+]\d{2,5})(?:\s+[A-Za-z ]+)?\)")
-RE_AMERICAN = re.compile(r"(?i)\b([-+]\d{2,5})\b")
+RE_AMERICAN_PAREN = re.compile(r"(?i)\(([+-]\d{2,5})(?:\s+[A-Za-z][A-Za-z .'-]*)?\)")
+RE_AMERICAN = re.compile(r"(?i)(?<![\w.])([+-]\d{2,5})(?![\d.])")
 RE_MULT = re.compile(r"(?i)(?<![\w.])((?:\d+(?:\.\d+)?|\.\d+))\s*x\b")
+RE_DECIMAL_CONTEXT = re.compile(r"(?i)(?:\bodds?\s*[:=]?\s*|@\s*)(\d{1,3}(?:\.\d+)?)\b")
+RE_DECIMAL_SUFFIX = re.compile(r"(?i)\b(\d{1,3}(?:\.\d+)?)\s*(?:decimal|dec)\b")
 RE_LINE = re.compile(r"(?i)\b(?:over|under|o|u)\s*((?:\d+(?:\.\d+)?|\.\d+))\b")
 RE_ISO_DATE = re.compile(r"(?<!\d)(20\d{2}-\d{1,2}-\d{1,2})(?!\d)")
 RE_SLASH_DATE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)")
@@ -549,15 +551,59 @@ def parse_risk_units(text: str) -> Optional[float]:
 
 
 def parse_odds_text(text: str) -> str:
+    """Parse American, multiplier, or decimal odds from a play message."""
     m = RE_AMERICAN_PAREN.search(text)
     if m:
         return m.group(1)
+
     m = RE_MULT.search(text)
     if m:
         return f"{m.group(1)}x"
+
+    # Signed American odds can appear with or without parentheses, including +715.
     m = RE_AMERICAN.search(text)
     if m:
         return m.group(1)
+
+    # Decimal odds must be clearly labeled to avoid confusing a prop line with odds.
+    # Supported examples: Odds: 2.50, Odds 2.50, @ 2.50, 2.50 decimal.
+    for regex in (RE_DECIMAL_CONTEXT, RE_DECIMAL_SUFFIX):
+        m = regex.search(text)
+        if not m:
+            continue
+        try:
+            decimal_odds = float(m.group(1))
+        except Exception:
+            continue
+        if decimal_odds > 1.0:
+            return m.group(1)
+
+    return ""
+
+
+def parse_manual_odds_text(value: str) -> str:
+    """Normalize odds supplied directly to an admin correction command."""
+    clean = normalize_space(value).replace(" ", "")
+
+    if re.fullmatch(r"[+-]\d{2,5}", clean):
+        return clean
+
+    if re.fullmatch(r"(?:\d+(?:\.\d+)?|\.\d+)x", clean, flags=re.IGNORECASE):
+        try:
+            mult = float(clean[:-1])
+        except Exception:
+            return ""
+        return f"{mult:g}x" if mult > 1.0 else ""
+
+    if re.fullmatch(r"\d{1,3}(?:\.\d+)?", clean):
+        try:
+            decimal_odds = float(clean)
+        except Exception:
+            return ""
+        if decimal_odds > 1.0:
+            # Keep at least two decimal places so it is visibly decimal odds.
+            return f"{decimal_odds:.2f}"
+
     return ""
 
 
@@ -575,12 +621,15 @@ def infer_odds_format(odds_text: str) -> str:
         return ""
     if odds_text.lower().endswith("x"):
         return "multiplier"
-    try:
-        int(odds_text)
+    if re.fullmatch(r"[+-]\d{2,5}", odds_text):
         return "american"
+    try:
+        decimal_odds = float(odds_text)
+        if decimal_odds > 1.0 and "." in odds_text:
+            return "decimal"
     except Exception:
-        return ""
-
+        pass
+    return ""
 
 def parse_line(text: str) -> str:
     m = RE_LINE.search(text)
@@ -656,10 +705,14 @@ def profit_from_american(risk: float, american: int) -> float:
 
 
 def profit_from_multiplier(risk: float, mult: float) -> float:
-    # Correct multiplier math:
-    # .25u at 3x returns .75u total, but profit is .50u.
-    # Net profit = risk * (multiplier - 1)
+    # Multiplier is total return, so subtract the original stake for net profit.
+    # Example: .25u at 3x returns .75u total and profits .50u.
     return risk * (mult - 1.0)
+
+
+def profit_from_decimal(risk: float, decimal_odds: float) -> float:
+    # Decimal odds are total return, so net profit is risk * (odds - 1).
+    return risk * (decimal_odds - 1.0)
 
 
 def compute_net_units(risk: float, odds_text: str, result: str) -> float:
@@ -669,24 +722,32 @@ def compute_net_units(risk: float, odds_text: str, result: str) -> float:
     if result == "loss":
         return -risk
 
-    if not odds_text:
+    clean_odds = str(odds_text or "").strip()
+    if not clean_odds:
+        # Preserve legacy behavior for a win when no odds were supplied.
         return risk
 
-    if odds_text.lower().endswith("x"):
+    if clean_odds.lower().endswith("x"):
         try:
-            mult = float(odds_text[:-1])
-            if mult <= 1:
-                return 0.0
-            return profit_from_multiplier(risk, mult)
+            mult = float(clean_odds[:-1])
+            return profit_from_multiplier(risk, mult) if mult > 1.0 else 0.0
+        except Exception:
+            return risk
+
+    if re.fullmatch(r"[+-]\d{2,5}", clean_odds):
+        try:
+            return profit_from_american(risk, int(clean_odds))
         except Exception:
             return risk
 
     try:
-        american = int(odds_text)
-        return profit_from_american(risk, american)
+        decimal_odds = float(clean_odds)
+        if decimal_odds > 1.0:
+            return profit_from_decimal(risk, decimal_odds)
     except Exception:
-        return risk
+        pass
 
+    return risk
 
 def emoji_to_result(emoji: str) -> str:
     if emoji == WIN_EMOJI:
@@ -830,75 +891,214 @@ def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[i
     return int(row[0] or 0), float(row[1] or 0.0), float(row[2] or 0.0), int(row[3] or 0), int(row[4] or 0), int(row[5] or 0)
 
 
-def fetch_recent_bets(where_sql: str, params: Tuple[object, ...], limit: int = 5) -> List[Tuple[str, str, str, float, float, str, str, str]]:
+def fetch_recent_bets(
+    where_sql: str,
+    params: Tuple[object, ...],
+    limit: int = 20,
+) -> List[Tuple[str, str, str, float, float, str, str, str, str, str]]:
     rows = cur.execute(
         f"""
-        SELECT graded_utc, capper, result, risk_units, net_units, content, market, jump_url
+        SELECT graded_utc, capper, result, risk_units, net_units, content, market,
+               odds_text, sport, jump_url
         FROM bets
         WHERE {where_sql}
-        ORDER BY graded_utc DESC
+        ORDER BY graded_utc ASC
         LIMIT ?
         """,
         (*params, int(limit)),
     ).fetchall()
     return [
         (
-            str(created),
+            str(graded),
             str(capper),
             str(result),
             float(risk),
             float(net),
             str(content or ""),
             str(market or ""),
+            str(odds or ""),
+            str(sport or "UNKNOWN"),
             str(jump or ""),
         )
-        for created, capper, result, risk, net, content, market, jump in rows
+        for graded, capper, result, risk, net, content, market, odds, sport, jump in rows
     ]
 
 
-def display_bet_text(content: str, market: str, max_len: int = 130) -> str:
-    # Prefer the original Discord message/embed text so recaps show the actual bet,
-    # not just the generic word "Bet."
-    text = normalize_space(content) or normalize_space(market) or "Bet details unavailable"
-    # Remove role pings from display to keep recaps clean.
-    text = re.sub(r"<@&\d+>", "", text)
-    text = normalize_space(text)
-    if len(text) > max_len:
-        return text[: max_len - 3] + "..."
-    return text
+def format_compact_number(value: float, max_decimals: int = 2) -> str:
+    text = f"{float(value):.{max_decimals}f}".rstrip("0").rstrip(".")
+    return text if text not in {"-0", ""} else "0"
 
 
-def build_filtered_summary_text(title: str, where_sql: str, params: Tuple[object, ...]) -> str:
+def format_compact_units(value: float, signed: bool = False) -> str:
+    number = format_compact_number(abs(value) if signed else value)
+    if signed:
+        sign = "+" if value > 0 else ("-" if value < 0 else "")
+        return f"{sign}{number}u"
+    return f"{number}u"
+
+
+def format_odds_display(odds_text: str) -> str:
+    return str(odds_text or "N/A")
+
+
+def _find_odds_start(text: str) -> Optional[int]:
+    matches: List[int] = []
+    for regex in (RE_AMERICAN_PAREN, RE_MULT, RE_AMERICAN, RE_DECIMAL_CONTEXT, RE_DECIMAL_SUFFIX):
+        match = regex.search(text)
+        if match:
+            matches.append(match.start())
+    return min(matches) if matches else None
+
+
+def display_bet_text(content: str, market: str, max_len: int = 95) -> str:
+    """Return only the wager description, not headers, dates, pings, or writeups."""
+    raw = content or market or ""
+    raw = re.sub(r"<@!?&?\d+>", "", raw)
+    raw = re.sub(r"https?://\S+", "", raw)
+
+    # The actual wager is normally the first line containing a stake.
+    chosen = ""
+    for line in raw.splitlines():
+        if RE_UNITS.search(line):
+            chosen = line
+            break
+    if not chosen:
+        chosen = raw
+
+    chosen = normalize_space(chosen)
+    stake_match = RE_UNITS.search(chosen)
+    if stake_match:
+        chosen = chosen[stake_match.end():]
+
+    odds_start = _find_odds_start(chosen)
+    if odds_start is not None:
+        chosen = chosen[:odds_start]
+
+    chosen = RE_ISO_DATE.sub("", chosen)
+    chosen = RE_SLASH_DATE.sub("", chosen)
+    chosen = re.sub(r"(?i)\b(?:odds?|date)\s*[:=]?", "", chosen)
+    chosen = normalize_space(chosen).strip(" -–—|:()")
+
+    if not chosen:
+        chosen = normalize_space(market) or "Bet details unavailable"
+        stake_match = RE_UNITS.search(chosen)
+        if stake_match:
+            chosen = chosen[stake_match.end():]
+        odds_start = _find_odds_start(chosen)
+        if odds_start is not None:
+            chosen = chosen[:odds_start]
+        chosen = normalize_space(chosen).strip(" -–—|:()")
+
+    if len(chosen) > max_len:
+        chosen = chosen[: max_len - 3].rstrip() + "..."
+    return chosen or "Bet details unavailable"
+
+
+def clean_period_label(label: Optional[str]) -> str:
+    if not label or label == "All-Time":
+        return "All-Time"
+    exact = re.search(r"(20\d{2}-\d{2}-\d{2})", label)
+    if exact:
+        return exact.group(1)
+    if label.startswith("Month: "):
+        return label.replace("Month: ", "", 1)
+    if label.startswith("Year: "):
+        return label.replace("Year: ", "", 1)
+    return label
+
+
+def split_discord_text(text: str, limit: int = 1900) -> List[str]:
+    chunks: List[str] = []
+    current = ""
+    for line in text.splitlines():
+        candidate = line if not current else f"{current}\n{line}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks or [text[:limit]]
+
+
+def build_filtered_summary_text(
+    title: str,
+    where_sql: str,
+    params: Tuple[object, ...],
+    capper_name: Optional[str] = None,
+    period_label: str = "All-Time",
+    sport_name: Optional[str] = None,
+) -> str:
     total, risk, net, wins, losses, pushes = fetch_filtered_totals(where_sql, params)
     graded = wins + losses
     win_pct = (wins / graded * 100.0) if graded > 0 else 0.0
     roi = (net / risk * 100.0) if risk > 0 else 0.0
     record = f"{wins}-{losses}" + (f"-{pushes}" if pushes > 0 else "")
 
-    lines = [
-        f"📊 **{title}**",
-        f"Record: **{record}** ({win_pct:.1f}%)",
-        f"Net Units: **{net:+.2f}u**",
-        f"Risked: **{risk:.2f}u** | ROI: **{roi:.1f}%**",
-        f"Total Bets: **{total}**",
-    ]
+    if capper_name:
+        lines = [f"📊 **Capper: {capper_name}**"]
+        if sport_name:
+            lines.append(f"Sport: **{sport_name}**")
+        lines.extend(
+            [
+                f"Date: **{period_label}**",
+                f"Record: **{record}** ({win_pct:.1f}%)",
+                f"Risked: **{risk:.2f}u**",
+                f"Net Units: **{net:+.2f}u**",
+                f"ROI: **{roi:.1f}%**",
+                f"Total Bets: **{total}**",
+            ]
+        )
+    else:
+        lines = [
+            f"📊 **{title}**",
+            f"Record: **{record}** ({win_pct:.1f}%)",
+            f"Risked: **{risk:.2f}u**",
+            f"Net Units: **{net:+.2f}u**",
+            f"ROI: **{roi:.1f}%**",
+            f"Total Bets: **{total}**",
+        ]
 
-    recent = fetch_recent_bets(where_sql, params)
-    if recent:
-        lines.append("\n**Recent Bets**")
-        for created, capper, result, risk_units, net_units, content, market, jump_url in recent:
+    bets = fetch_recent_bets(where_sql, params, limit=25)
+    if bets:
+        lines.append("\n**Bets:**")
+        for _graded, _capper, result, risk_units, net_units, content, market, odds_text, sport, jump_url in bets:
             icon = "✅" if result == "win" else ("❌" if result == "loss" else "➖")
             bet_text = display_bet_text(content, market)
-            if jump_url:
-                lines.append(f"{icon} **{capper}** | {bet_text} | {net_units:+.2f}u | [jump]({jump_url})")
+            jump = f"[jump]({jump_url})" if jump_url else "jump unavailable"
+            if capper_name:
+                prefix = f"{icon} {format_compact_units(risk_units)}"
             else:
-                lines.append(f"{icon} **{capper}** | {bet_text} | {net_units:+.2f}u")
+                prefix = f"{icon} **{_capper}** | {format_compact_units(risk_units)}"
+            lines.append(
+                f"{prefix} | {bet_text} | Odds: {format_odds_display(odds_text)} | "
+                f"{sport} | {format_compact_units(net_units, signed=True)} | {jump}"
+            )
 
     return "\n".join(lines)
 
 
-async def post_filtered_summary(ctx: commands.Context, title: str, where_sql: str, params: Tuple[object, ...]) -> None:
-    await ctx.send(build_filtered_summary_text(title, where_sql, params))
+async def post_filtered_summary(
+    ctx: commands.Context,
+    title: str,
+    where_sql: str,
+    params: Tuple[object, ...],
+    capper_name: Optional[str] = None,
+    period_label: str = "All-Time",
+    sport_name: Optional[str] = None,
+) -> None:
+    text = build_filtered_summary_text(
+        title,
+        where_sql,
+        params,
+        capper_name=capper_name,
+        period_label=period_label,
+        sport_name=sport_name,
+    )
+    for chunk in split_discord_text(text):
+        await ctx.send(chunk)
 
 
 # =====================
@@ -1094,6 +1294,8 @@ async def post_query_summary(
     where_parts: List[str],
     params: List[object],
     time_text: str = "",
+    capper_name: Optional[str] = None,
+    sport_name: Optional[str] = None,
 ) -> None:
     label, start_l, end_l, error = parse_time_filter(time_text)
     if error:
@@ -1102,7 +1304,15 @@ async def post_query_summary(
     add_time_filter(where_parts, params, start_l, end_l)
     where_sql, final_params = build_where(where_parts, params)
     title = base_title if not label or label == "All-Time" else f"{base_title} — {label}"
-    await post_filtered_summary(ctx, title, where_sql, final_params)
+    await post_filtered_summary(
+        ctx,
+        title,
+        where_sql,
+        final_params,
+        capper_name=capper_name,
+        period_label=clean_period_label(label),
+        sport_name=sport_name,
+    )
 
 
 # =====================
@@ -1180,6 +1390,54 @@ def insert_pending(
             str(fields["sportsbook"]),
             str(fields["odds_format"]),
             fields["multiplier"],
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bool:
+    """Re-parse a pending wager after the capper edits the Discord message."""
+    if not pending_exists(message.id):
+        return False
+
+    content = message_to_text(message)
+    risk = parse_risk_units(content)
+    if risk is None:
+        return False
+
+    odds_text = parse_odds_text(content)
+    fields = parse_analytics_fields(content, odds_text)
+    created_utc = utc_iso(message.created_at)
+    bet_date = parse_bet_date(content, created_utc)
+
+    cur.execute(
+        """
+        UPDATE pending
+        SET content = ?, bet_date = ?, sport = ?, risk_units = ?, odds_text = ?,
+            jump_url = ?, league = ?, event = ?, player = ?, team = ?, opponent = ?,
+            bet_type = ?, market = ?, line = ?, sportsbook = ?, odds_format = ?, multiplier = ?
+        WHERE message_id = ?
+        """,
+        (
+            content,
+            bet_date,
+            str(fields["sport"]),
+            float(risk),
+            odds_text,
+            message.jump_url,
+            str(fields["league"]),
+            str(fields["event"]),
+            str(fields["player"]),
+            str(fields["team"]),
+            str(fields["opponent"]),
+            str(fields["bet_type"]),
+            str(fields["market"]),
+            str(fields["line"]),
+            str(fields["sportsbook"]),
+            str(fields["odds_format"]),
+            fields["multiplier"],
+            int(message.id),
         ),
     )
     conn.commit()
@@ -1481,6 +1739,53 @@ async def on_message(message: discord.Message) -> None:
 
 
 @bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
+    """Refresh parsing when a capper edits an ungraded play."""
+    if bot.user and after.author.id == bot.user.id:
+        return
+
+    capper = TRACKED_CHANNELS.get(after.channel.id)
+    if not capper:
+        return
+
+    is_capper_user = after.author.id == capper.user_id
+    is_webhook_post = after.webhook_id is not None
+    if not (is_capper_user or is_webhook_post):
+        return
+
+    # Edits only update pending bets. Graded bets require bt!setodds or bt!setdate
+    # so results never change silently after grading.
+    refresh_pending_from_message(after, capper)
+
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
+    """Refresh an edited pending play even when the message was not in Discord's cache."""
+    if not pending_exists(payload.message_id):
+        return
+
+    capper = TRACKED_CHANNELS.get(payload.channel_id)
+    if not capper:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
+    except Exception:
+        return
+
+    is_capper_user = message.author.id == capper.user_id
+    is_webhook_post = message.webhook_id is not None
+    if not (is_capper_user or is_webhook_post):
+        return
+
+    refresh_pending_from_message(message, capper)
+
+
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     if not bot.user:
         return
@@ -1581,31 +1886,29 @@ async def ping(ctx: commands.Context) -> None:
 async def commands_cmd(ctx: commands.Context) -> None:
     await ctx.send(
         "📌 **BetTracker Commands**\n"
-        "Run these in `#vipbot-commands`.\n\n"
-        "**Basic**\n"
-        "`bt!ping`\n"
-        "`bt!pending`\n"
-        "`bt!commands`\n\n"
+        "Run normal lookups in `#vipbot-commands`.\n\n"
         "**Dates**\n"
         "`bt!today`\n"
         "`bt!yesterday`\n"
-        "`bt!date 2026-07-09`\n"
+        "`bt!date 2026-07-14`\n"
         "`bt!month 2026-07`\n"
         "`bt!year 2026`\n"
         "`bt!range 2026-07-01 2026-07-31`\n\n"
-        "**Cleaner Capper Commands**\n"
+        "**Capper / Sport**\n"
         "`bt!capper PropKitchen today`\n"
-        "`bt!capper PropKitchen yesterday`\n"
-        "`bt!capper PropKitchen 2026-07-09`\n"
-        "`bt!capper gr8 july`\n"
-        "`bt!capper gr8 WNBA july`\n\n"
-        "**Sport / Player / Bet Type**\n"
+        "`bt!capper PropKitchen 2026-07-11`\n"
+        "`bt!capper gr8 WNBA july`\n"
         "`bt!sport WNBA today`\n"
-        "`bt!sport MLB 2026-07-09`\n"
         "`bt!player Paige Bueckers`\n"
         "`bt!bettype Rebounds`\n\n"
-        "**Admin**\n"
+        "**Admin Corrections — reply to the original bet**\n"
+        "`bt!setdate 2026-07-12`\n"
+        "`bt!setodds +715`\n"
+        "`bt!setodds 3x`\n"
+        "`bt!setodds 2.50`\n\n"
+        "**Admin Cleanup**\n"
         "`bt!fix_decimal_units`\n"
+        "`bt!fix_bet_dates`\n"
         "`bt!recalc_multipliers`\n"
         "`bt!clear_pending_old`\n"
         "`bt!clear_pending_before today`"
@@ -1943,7 +2246,7 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
     limit = max(1, min(int(limit), 500))
     rows = cur.execute(
         """
-        SELECT id, message_id, channel_id
+        SELECT id, message_id, channel_id, risk_units, result, net_units
         FROM bets
         WHERE content = '' OR content IS NULL
         ORDER BY created_utc DESC
@@ -1954,7 +2257,8 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
 
     updated = 0
     checked = 0
-    for bet_id, message_id, channel_id in rows:
+    corrected_units = 0
+    for bet_id, message_id, channel_id, risk_units, result, old_net in rows:
         checked += 1
         channel = bot.get_channel(int(channel_id))
         if channel is None:
@@ -1970,11 +2274,15 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
         odds_text = parse_odds_text(content)
         fields = parse_analytics_fields(content, odds_text)
         bet_date = parse_bet_date(content, msg.created_at.isoformat())
+        new_net = compute_net_units(float(risk_units), odds_text, str(result)) if odds_text else float(old_net)
+        if abs(float(new_net) - float(old_net)) > 0.0001:
+            corrected_units += 1
         cur.execute(
             """
             UPDATE bets
             SET content = ?, market = ?, player = ?, bet_type = ?, league = ?, sport = ?,
-                line = ?, sportsbook = ?, odds_format = ?, multiplier = ?, bet_date = COALESCE(NULLIF(?, ''), bet_date)
+                line = ?, sportsbook = ?, odds_text = ?, odds_format = ?, multiplier = ?, net_units = ?,
+                bet_date = COALESCE(NULLIF(?, ''), bet_date)
             WHERE id = ?
             """,
             (
@@ -1986,8 +2294,10 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
                 str(fields["sport"]),
                 str(fields["line"]),
                 str(fields["sportsbook"]),
+                odds_text,
                 str(fields["odds_format"]),
                 fields["multiplier"],
+                float(new_net),
                 bet_date,
                 int(bet_id),
             ),
@@ -1995,7 +2305,108 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
         updated += 1
 
     conn.commit()
-    await ctx.send(f"✅ **Backfill Complete**\nChecked: **{checked}** rows\nUpdated with recovered bet text: **{updated}**")
+    await ctx.send(
+        f"✅ **Backfill Complete**\n"
+        f"Checked: **{checked}** rows\n"
+        f"Updated with recovered bet text: **{updated}**\n"
+        f"Rows with corrected unit calculations: **{corrected_units}**"
+    )
+
+
+def referenced_message_id(ctx: commands.Context) -> Optional[int]:
+    reference = ctx.message.reference
+    if not reference or not reference.message_id:
+        return None
+    return int(reference.message_id)
+
+
+@bot.command(name="setdate", aliases=["set_bet_date", "fixdate"])
+@commands.has_permissions(manage_guild=True)
+async def setdate_cmd(ctx: commands.Context, date_arg: str) -> None:
+    message_id = referenced_message_id(ctx)
+    if message_id is None:
+        await ctx.send("Reply to the original bet and use `bt!setdate 2026-07-12`.")
+        return
+
+    parsed = parse_date_yyyy_mm_dd(date_arg)
+    if not parsed:
+        await ctx.send("Use exact format: `bt!setdate 2026-07-12`.")
+        return
+
+    updated_pending = cur.execute(
+        "UPDATE pending SET bet_date = ? WHERE message_id = ?",
+        (parsed.isoformat(), message_id),
+    ).rowcount
+    updated_bet = cur.execute(
+        "UPDATE bets SET bet_date = ? WHERE message_id = ?",
+        (parsed.isoformat(), message_id),
+    ).rowcount
+    conn.commit()
+
+    if not updated_pending and not updated_bet:
+        await ctx.send("I could not find that replied-to message in pending or graded bets.")
+        return
+
+    await ctx.send(f"✅ Bet date updated to **{parsed.isoformat()}**.")
+
+
+@bot.command(name="setodds", aliases=["set_odds", "fixodds"])
+@commands.has_permissions(manage_guild=True)
+async def setodds_cmd(ctx: commands.Context, *, odds_arg: str) -> None:
+    message_id = referenced_message_id(ctx)
+    if message_id is None:
+        await ctx.send("Reply to the original bet and use `bt!setodds +715`, `bt!setodds 3x`, or `bt!setodds 2.50`.")
+        return
+
+    odds_text = parse_manual_odds_text(odds_arg)
+    if not odds_text:
+        await ctx.send("Odds not recognized. Use American `+715`/`-120`, multiplier `3x`, or decimal `2.50`.")
+        return
+
+    odds_format = infer_odds_format(odds_text)
+    multiplier = parse_multiplier_value(odds_text)
+
+    pending_row = cur.execute(
+        "SELECT message_id FROM pending WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    if pending_row:
+        cur.execute(
+            """
+            UPDATE pending
+            SET odds_text = ?, odds_format = ?, multiplier = ?
+            WHERE message_id = ?
+            """,
+            (odds_text, odds_format, multiplier, message_id),
+        )
+        conn.commit()
+        await ctx.send(f"✅ Pending bet odds updated to **{odds_text}**.")
+        return
+
+    bet_row = cur.execute(
+        "SELECT risk_units, result, net_units FROM bets WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    if not bet_row:
+        await ctx.send("I could not find that replied-to message in pending or graded bets.")
+        return
+
+    risk_units, result, old_net = bet_row
+    new_net = compute_net_units(float(risk_units), odds_text, str(result))
+    cur.execute(
+        """
+        UPDATE bets
+        SET odds_text = ?, odds_format = ?, multiplier = ?, net_units = ?
+        WHERE message_id = ?
+        """,
+        (odds_text, odds_format, multiplier, float(new_net), message_id),
+    )
+    conn.commit()
+
+    await ctx.send(
+        f"✅ Graded bet odds updated to **{odds_text}**.\n"
+        f"Net units corrected from **{float(old_net):+.2f}u** to **{new_net:+.2f}u**."
+    )
 
 
 @bot.command(name="sport")
@@ -2038,7 +2449,15 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
         title += f" — {sport}"
 
     time_text = " ".join(remaining)
-    await post_query_summary(ctx, title, where_parts, params, time_text)
+    await post_query_summary(
+        ctx,
+        title,
+        where_parts,
+        params,
+        time_text,
+        capper_name=capper,
+        sport_name=sport,
+    )
 
 
 @bot.command(name="player")

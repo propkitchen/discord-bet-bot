@@ -859,16 +859,15 @@ def make_vip_line(net_units: float, wins: int, losses: int, pushes: int) -> str:
 
 
 async def post_period_summary(channel: discord.abc.Messageable, title: str, start_local: datetime, end_local: datetime) -> None:
-    rows = fetch_capper_rows(start_local, end_local)
-    vip_net, vip_w, vip_l, vip_p = fetch_vip_totals(start_local, end_local)
-
-    await channel.send(
-        f"📊 **{title}**\n{make_vip_line(vip_net, vip_w, vip_l, vip_p)}\n\n{make_rows_text(rows)}"
+    where_sql, params = date_window_where(start_local, end_local)
+    await post_leaderboard(
+        channel,
+        title,
+        format_period_window(start_local, end_local),
+        where_sql,
+        params,
+        include_chart=True,
     )
-
-    if rows:
-        img = generate_units_chart(f"{title} Net Units", rows)
-        await channel.send(file=discord.File(img, filename="units.png"))
 
 
 def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[int, float, float, int, int, int]:
@@ -889,6 +888,191 @@ def fetch_filtered_totals(where_sql: str, params: Tuple[object, ...]) -> Tuple[i
     if not row:
         return 0, 0.0, 0.0, 0, 0, 0
     return int(row[0] or 0), float(row[1] or 0.0), float(row[2] or 0.0), int(row[3] or 0), int(row[4] or 0), int(row[5] or 0)
+
+
+def tracked_capper_display_names() -> List[str]:
+    """Return every configured capper once, preserving config order."""
+    names: List[str] = []
+    seen: set[str] = set()
+    for capper in TRACKED_CHANNELS.values():
+        key = capper.name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(capper.name)
+    return names
+
+
+def fetch_leaderboard_rows(
+    where_sql: str,
+    params: Tuple[object, ...],
+    include_zero_cappers: bool = True,
+) -> List[Tuple[str, int, float, float, int, int, int, float, float]]:
+    """
+    Return name, bets, risked, profit, wins, losses, pushes, win rate, and ROI.
+
+    Active cappers rank by net units, then ROI, then number of bets.
+    Configured cappers with no qualifying bets stay at the bottom.
+    """
+    db_rows = cur.execute(
+        f"""
+        SELECT
+            LOWER(capper) AS capper_key,
+            MAX(capper) AS capper_display,
+            COUNT(*) AS total_bets,
+            COALESCE(SUM(risk_units), 0) AS risk_sum,
+            COALESCE(SUM(net_units), 0) AS net_sum,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes
+        FROM bets
+        WHERE {where_sql}
+        GROUP BY LOWER(capper)
+        """,
+        params,
+    ).fetchall()
+
+    stats: Dict[str, Tuple[str, int, float, float, int, int, int]] = {}
+    for key, display, total, risk, net, wins, losses, pushes in db_rows:
+        stats[str(key)] = (
+            str(display),
+            int(total or 0),
+            float(risk or 0.0),
+            float(net or 0.0),
+            int(wins or 0),
+            int(losses or 0),
+            int(pushes or 0),
+        )
+
+    ordered_names = tracked_capper_display_names()
+    configured_keys = {name.lower() for name in ordered_names}
+    for key, values in stats.items():
+        if key not in configured_keys:
+            ordered_names.append(values[0])
+
+    rows: List[Tuple[str, int, float, float, int, int, int, float, float]] = []
+    for name in ordered_names:
+        values = stats.get(name.lower())
+        if values is None:
+            if not include_zero_cappers:
+                continue
+            total = 0
+            risk = 0.0
+            net = 0.0
+            wins = losses = pushes = 0
+        else:
+            _display, total, risk, net, wins, losses, pushes = values
+
+        graded = wins + losses
+        win_pct = (wins / graded * 100.0) if graded > 0 else 0.0
+        roi = (net / risk * 100.0) if risk > 0 else 0.0
+        rows.append((name, total, risk, net, wins, losses, pushes, win_pct, roi))
+
+    rows.sort(
+        key=lambda row: (
+            row[1] == 0,
+            -row[3],
+            -row[8],
+            -row[1],
+            row[0].lower(),
+        )
+    )
+    return rows
+
+
+def format_period_window(start_local: datetime, end_local: datetime) -> str:
+    """Create a compact user-facing label for a date window."""
+    inclusive_end = (end_local - timedelta(days=1)).date()
+    start_day = start_local.date()
+    if start_day == inclusive_end:
+        return start_day.isoformat()
+    if start_day.day == 1 and end_local.day == 1:
+        if start_day.month == 1 and end_local.month == 1 and end_local.year == start_day.year + 1:
+            return str(start_day.year)
+        next_month = 1 if start_day.month == 12 else start_day.month + 1
+        next_year = start_day.year + 1 if start_day.month == 12 else start_day.year
+        if end_local.year == next_year and end_local.month == next_month:
+            return f"{start_day.year}-{start_day.month:02d}"
+    return f"{start_day.isoformat()} → {inclusive_end.isoformat()}"
+
+
+def build_leaderboard_text(
+    title: str,
+    period_label: str,
+    where_sql: str,
+    params: Tuple[object, ...],
+    sport_name: Optional[str] = None,
+    league_name: Optional[str] = None,
+) -> str:
+    total, risk, net, wins, losses, pushes = fetch_filtered_totals(where_sql, params)
+    graded = wins + losses
+    win_pct = (wins / graded * 100.0) if graded > 0 else 0.0
+    roi = (net / risk * 100.0) if risk > 0 else 0.0
+    record = f"{wins}-{losses}" + (f"-{pushes}" if pushes > 0 else "")
+
+    lines = [f"📊 **{title}**", f"Period: **{period_label}**"]
+    if sport_name:
+        lines.append(f"Sport: **{sport_name}**")
+    if league_name:
+        lines.append(f"League: **{league_name}**")
+    lines.extend(
+        [
+            "",
+            "**VIP TOTAL**",
+            f"Record: **{record}** ({win_pct:.1f}%) | Bets: **{total}**",
+            f"Risked: **{risk:.2f}u** | Net Units: **{net:+.2f}u** | ROI: **{roi:.1f}%**",
+            "",
+            "**Leaderboard — Sorted by Net Units**",
+        ]
+    )
+
+    rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=True)
+    for rank, row in enumerate(rows, start=1):
+        name, capper_total, capper_risk, capper_net, capper_w, capper_l, capper_p, capper_win_pct, capper_roi = row
+        capper_record = f"{capper_w}-{capper_l}" + (f"-{capper_p}" if capper_p > 0 else "")
+        if capper_total == 0:
+            lines.append(f"{rank}. **{name}** — 0-0 | 0 bets | +0.00u")
+            continue
+        lines.append(f"{rank}. **{name}**")
+        lines.append(f"Record: **{capper_record}** ({capper_win_pct:.1f}%) | Bets: **{capper_total}**")
+        lines.append(
+            f"Risked: **{capper_risk:.2f}u** | Net Units: **{capper_net:+.2f}u** | ROI: **{capper_roi:.1f}%**"
+        )
+
+    return "\n".join(lines)
+
+
+async def post_leaderboard(
+    channel: discord.abc.Messageable,
+    title: str,
+    period_label: str,
+    where_sql: str,
+    params: Tuple[object, ...],
+    sport_name: Optional[str] = None,
+    league_name: Optional[str] = None,
+    include_chart: bool = False,
+) -> None:
+    text = build_leaderboard_text(
+        title,
+        period_label,
+        where_sql,
+        params,
+        sport_name=sport_name,
+        league_name=league_name,
+    )
+    for chunk in split_discord_text(text):
+        await channel.send(chunk)
+
+    if include_chart:
+        rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=False)
+        chart_rows = [
+            (name, net, wins, losses, pushes)
+            for name, total, _risk, net, wins, losses, pushes, _wp, _roi in rows
+            if total > 0
+        ]
+        if chart_rows:
+            img = generate_units_chart(f"{title} Net Units", chart_rows)
+            await channel.send(file=discord.File(img, filename="units.png"))
 
 
 def fetch_recent_bets(
@@ -1004,6 +1188,8 @@ def clean_period_label(label: Optional[str]) -> str:
         return label.replace("Month: ", "", 1)
     if label.startswith("Year: "):
         return label.replace("Year: ", "", 1)
+    if label.startswith("Range: "):
+        return label.replace("Range: ", "", 1)
     return label
 
 
@@ -1246,6 +1432,19 @@ def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Opti
         start, end = period_bounds_local("monthly", ref)
         return f"Last Month ({start.year}-{start.month:02d})", start, end, None
 
+    # Custom inclusive ranges work anywhere a time filter is accepted.
+    # Examples: 2026-07-01 2026-07-14 or 2026-07-01 to 2026-07-14.
+    range_tokens = text.replace("→", " ").replace(" through ", " ").replace(" to ", " ").split()
+    if len(range_tokens) == 2:
+        range_start = parse_date_yyyy_mm_dd(range_tokens[0])
+        range_end = parse_date_yyyy_mm_dd(range_tokens[1])
+        if range_start and range_end:
+            if range_end < range_start:
+                return None, None, None, "The ending date must be on or after the starting date."
+            start, _ = local_day_bounds(range_start)
+            _unused, end = local_day_bounds(range_end)
+            return f"Range: {range_start.isoformat()} → {range_end.isoformat()}", start, end, None
+
     exact_day = parse_date_yyyy_mm_dd(text)
     if exact_day:
         start, end = local_day_bounds(exact_day)
@@ -1313,6 +1512,63 @@ async def post_query_summary(
         period_label=clean_period_label(label),
         sport_name=sport_name,
     )
+
+
+async def post_leaderboard_query(
+    ctx: commands.Context,
+    time_text: str = "",
+    sport_name: Optional[str] = None,
+    league_name: Optional[str] = None,
+    include_chart: bool = False,
+) -> None:
+    label, start_l, end_l, error = parse_time_filter(time_text)
+    if error:
+        await ctx.send(error)
+        return
+
+    where_parts: List[str] = []
+    params: List[object] = []
+    if sport_name:
+        where_parts.append("UPPER(sport) = ?")
+        params.append(sport_name.upper())
+    if league_name:
+        where_parts.append("LOWER(league) = ?")
+        params.append(league_name.lower())
+    add_time_filter(where_parts, params, start_l, end_l)
+    where_sql, final_params = build_where(where_parts, params)
+
+    title = "VIP CAPPER LEADERBOARD"
+    if sport_name:
+        title = f"VIP {sport_name.upper()} LEADERBOARD"
+    elif league_name:
+        title = f"VIP {league_name} LEADERBOARD"
+
+    await post_leaderboard(
+        ctx,
+        title,
+        clean_period_label(label),
+        where_sql,
+        final_params,
+        sport_name=sport_name,
+        league_name=league_name,
+        include_chart=include_chart,
+    )
+
+
+def split_name_and_time_filter(query: str) -> Tuple[str, str]:
+    """Split a free-form name from an optional trailing time filter."""
+    tokens = split_args(query)
+    if not tokens:
+        return "", ""
+
+    for suffix_len in range(min(3, len(tokens)), 0, -1):
+        candidate = " ".join(tokens[-suffix_len:])
+        label, _start, _end, error = parse_time_filter(candidate)
+        if error is None and label != "All-Time":
+            name = " ".join(tokens[:-suffix_len]).strip()
+            if name:
+                return name, candidate
+    return " ".join(tokens).strip(), ""
 
 
 # =====================
@@ -1887,25 +2143,34 @@ async def commands_cmd(ctx: commands.Context) -> None:
     await ctx.send(
         "📌 **BetTracker Commands**\n"
         "Run normal lookups in `#vipbot-commands`.\n\n"
-        "**Dates**\n"
+        "**VIP Leaderboards**\n"
         "`bt!today`\n"
         "`bt!yesterday`\n"
-        "`bt!date 2026-07-14`\n"
+        "`bt!weekly`\n"
         "`bt!month 2026-07`\n"
         "`bt!year 2026`\n"
-        "`bt!range 2026-07-01 2026-07-31`\n\n"
-        "**Capper / Sport**\n"
+        "`bt!range 2026-07-01 2026-07-14`\n"
+        "`bt!alltime`\n\n"
+        "**Sport / League Leaderboards**\n"
+        "`bt!leaderboard MLB july`\n"
+        "`bt!leaderboard Tennis thisweek`\n"
+        "`bt!leaderboard WNBA 2026`\n"
+        "`bt!leaderboard Soccer 2026-07-01 2026-07-14`\n"
+        "`bt!sport MLB july`\n"
+        "`bt!league \"Premier League\" july`\n\n"
+        "**Detailed Capper Bets**\n"
         "`bt!capper PropKitchen today`\n"
-        "`bt!capper PropKitchen 2026-07-11`\n"
-        "`bt!capper gr8 WNBA july`\n"
-        "`bt!sport WNBA today`\n"
+        "`bt!capper gr8 MLB july`\n"
+        "`bt!capper pxs Tennis 2026-07-01 2026-07-14`\n"
+        "`bt!bets PropKitchen 2026-07`\n\n"
+        "**Player / Bet Type**\n"
         "`bt!player Paige Bueckers`\n"
         "`bt!bettype Rebounds`\n\n"
-        "**Admin Corrections — reply to the original bet**\n"
-        "`bt!setdate 2026-07-12`\n"
-        "`bt!setodds +715`\n"
-        "`bt!setodds 3x`\n"
-        "`bt!setodds 2.50`\n\n"
+        "**Admin Quality / Corrections**\n"
+        "`bt!data_issues today`\n"
+        "`bt!data_issues 2026-07`\n"
+        "Reply to the original bet: `bt!setdate 2026-07-12`\n"
+        "Reply to the original bet: `bt!setodds +715` / `3x` / `2.50`\n\n"
         "**Admin Cleanup**\n"
         "`bt!fix_decimal_units`\n"
         "`bt!fix_bet_dates`\n"
@@ -1917,48 +2182,42 @@ async def commands_cmd(ctx: commands.Context) -> None:
 
 @bot.command()
 async def daily(ctx: commands.Context) -> None:
-    start_l, end_l = period_bounds_local("daily")
-    await post_period_summary(ctx, "Daily", start_l, end_l)
+    await post_leaderboard_query(ctx, "today", include_chart=True)
 
 
 @bot.command()
 async def weekly(ctx: commands.Context) -> None:
-    start_l, end_l = period_bounds_local("weekly")
-    await post_period_summary(ctx, "Weekly", start_l, end_l)
+    await post_leaderboard_query(ctx, "thisweek", include_chart=True)
 
 
 @bot.command()
 async def monthly(ctx: commands.Context) -> None:
-    start_l, end_l = period_bounds_local("monthly")
-    await post_period_summary(ctx, "Monthly", start_l, end_l)
+    await post_leaderboard_query(ctx, "thismonth", include_chart=True)
 
 
 @bot.command()
 async def yearly(ctx: commands.Context) -> None:
-    start_l, end_l = period_bounds_local("yearly")
-    await post_period_summary(ctx, "Yearly", start_l, end_l)
+    await post_leaderboard_query(ctx, str(now_local().year), include_chart=True)
 
 
 @bot.command()
 async def alltime(ctx: commands.Context) -> None:
-    start_l = datetime(2000, 1, 1, 0, 0, 0, tzinfo=_tz())
-    end_l = now_local() + timedelta(days=1)
-    await post_period_summary(ctx, "All-Time", start_l, end_l)
+    await post_leaderboard_query(ctx, "alltime", include_chart=True)
 
 
 @bot.command(name="today")
 async def today_cmd(ctx: commands.Context) -> None:
-    await post_query_summary(ctx, "VIP Results", [], [], "today")
+    await post_leaderboard_query(ctx, "today")
 
 
 @bot.command(name="yesterday", aliases=["yday"])
 async def yesterday_cmd(ctx: commands.Context) -> None:
-    await post_query_summary(ctx, "VIP Results", [], [], "yesterday")
+    await post_leaderboard_query(ctx, "yesterday")
 
 
 @bot.command(name="date")
 async def date_cmd(ctx: commands.Context, date_arg: str) -> None:
-    await post_query_summary(ctx, "VIP Results", [], [], date_arg)
+    await post_leaderboard_query(ctx, date_arg)
 
 
 @bot.command(name="pending")
@@ -2409,32 +2668,41 @@ async def setodds_cmd(ctx: commands.Context, *, odds_arg: str) -> None:
     )
 
 
+@bot.command(name="leaderboard", aliases=["leaders", "lb"])
+async def leaderboard_cmd(ctx: commands.Context, *, query: str = "") -> None:
+    tokens = split_args(query)
+    sport, remaining = resolve_sport_from_tokens(tokens)
+    time_text = " ".join(remaining if sport else tokens)
+    await post_leaderboard_query(ctx, time_text, sport_name=sport)
+
+
 @bot.command(name="sport")
 async def sport_cmd(ctx: commands.Context, *, query: str) -> None:
     tokens = split_args(query)
     sport, remaining = resolve_sport_from_tokens(tokens)
     if not sport:
-        await ctx.send("Use format: `bt!sport WNBA`, `bt!sport WNBA today`, or `bt!sport MLB 2026-07-09`")
+        await ctx.send("Use format: `bt!sport WNBA`, `bt!sport WNBA today`, or `bt!sport MLB 2026-07`")
         return
-
-    time_text = " ".join(remaining)
-    await post_query_summary(ctx, f"Sport: {sport}", ["UPPER(sport) = ?"], [sport], time_text)
+    await post_leaderboard_query(ctx, " ".join(remaining), sport_name=sport)
 
 
 @bot.command(name="league")
-async def league_cmd(ctx: commands.Context, *, league_name: str) -> None:
-    value = league_name.strip().lower()
-    await post_filtered_summary(ctx, f"League: {league_name.strip()}", "LOWER(league) = ?", (value,))
+async def league_cmd(ctx: commands.Context, *, query: str) -> None:
+    league_name, time_text = split_name_and_time_filter(query)
+    if not league_name:
+        await ctx.send('Use format: `bt!league "Premier League" july`')
+        return
+    await post_leaderboard_query(ctx, time_text, league_name=league_name)
 
 
-@bot.command(name="capper")
+@bot.command(name="capper", aliases=["bets"])
 async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
     tokens = split_args(query)
     capper, remaining = resolve_capper_from_tokens(tokens)
     if not capper:
         await ctx.send(
-            "Use format: `bt!capper PropKitchen`, `bt!capper PropKitchen yesterday`, "
-            "`bt!capper PropKitchen 2026-07-09`, or `bt!capper gr8 WNBA july`"
+            "Use `bt!capper PropKitchen today`, `bt!capper gr8 MLB july`, "
+            "`bt!capper pxs Tennis 2026-07-01 2026-07-14`, or `bt!bets PropKitchen 2026-07`."
         )
         return
 
@@ -2484,33 +2752,101 @@ async def bettype_cmd(ctx: commands.Context, *, bet_type: str) -> None:
 
 @bot.command(name="month")
 async def month_cmd(ctx: commands.Context, ym: str) -> None:
-    await post_query_summary(ctx, "VIP Results", [], [], ym)
+    await post_leaderboard_query(ctx, ym)
 
 
 @bot.command(name="year")
 async def year_cmd(ctx: commands.Context, yyyy: str) -> None:
-    await post_query_summary(ctx, "VIP Results", [], [], yyyy)
+    await post_leaderboard_query(ctx, yyyy)
 
 
 @bot.command(name="range")
 async def range_cmd(ctx: commands.Context, start_date: str, end_date: str) -> None:
-    start_d = parse_date_yyyy_mm_dd(start_date)
-    end_d = parse_date_yyyy_mm_dd(end_date)
-    if not start_d or not end_d:
-        await ctx.send("Use format: `bt!range 2026-07-01 2026-07-31`")
+    await post_leaderboard_query(ctx, f"{start_date} {end_date}")
+
+
+@bot.command(name="data_issues", aliases=["dataissues", "issues"])
+@commands.has_permissions(manage_guild=True)
+async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismonth") -> None:
+    label, start_l, end_l, error = parse_time_filter(time_filter)
+    if error:
+        await ctx.send(error)
         return
 
-    start_l = datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=_tz())
-    # Inclusive end date for user convenience.
-    end_l = datetime(end_d.year, end_d.month, end_d.day, 0, 0, 0, tzinfo=_tz()) + timedelta(days=1)
+    where_parts: List[str] = []
+    params: List[object] = []
+    add_time_filter(where_parts, params, start_l, end_l)
+    where_sql, final_params = build_where(where_parts, params)
 
-    where_sql, params = date_window_where(start_l, end_l)
-    await post_filtered_summary(
-        ctx,
-        f"Range: {start_date} → {end_date}",
-        where_sql,
-        params,
-    )
+    rows = cur.execute(
+        f"""
+        SELECT capper, content, market, odds_text, sport, bet_date, league, jump_url, graded_utc
+        FROM bets
+        WHERE {where_sql}
+        ORDER BY graded_utc DESC
+        """,
+        final_params,
+    ).fetchall()
+
+    counts = {
+        "missing_description": 0,
+        "missing_odds": 0,
+        "unknown_sport": 0,
+        "missing_date": 0,
+        "missing_league": 0,
+        "missing_jump": 0,
+    }
+    affected: List[Tuple[str, List[str], str, str]] = []
+
+    for capper_name, content, market, odds_text, sport, bet_date, league, jump_url, _graded in rows:
+        issues: List[str] = []
+        bet_text = display_bet_text(str(content or ""), str(market or ""))
+        if bet_text == "Bet details unavailable":
+            counts["missing_description"] += 1
+            issues.append("description")
+        if not str(odds_text or "").strip():
+            counts["missing_odds"] += 1
+            issues.append("odds")
+        if str(sport or "").upper() in {"", "UNKNOWN"}:
+            counts["unknown_sport"] += 1
+            issues.append("sport")
+        if not str(bet_date or "").strip():
+            counts["missing_date"] += 1
+            issues.append("date")
+        if not str(league or "").strip():
+            counts["missing_league"] += 1
+            issues.append("league")
+        if not str(jump_url or "").strip():
+            counts["missing_jump"] += 1
+            issues.append("jump")
+        if issues and len(affected) < 10:
+            affected.append((str(capper_name), issues, bet_text, str(jump_url or "")))
+
+    total_issues = sum(counts.values())
+    lines = [
+        "🧹 **BetTracker Data Quality Check**",
+        f"Period: **{clean_period_label(label)}**",
+        f"Bets checked: **{len(rows)}**",
+        f"Total field issues: **{total_issues}**",
+        "",
+        f"Missing exact description: **{counts['missing_description']}**",
+        f"Missing odds: **{counts['missing_odds']}**",
+        f"Unknown sport: **{counts['unknown_sport']}**",
+        f"Missing bet date: **{counts['missing_date']}**",
+        f"Missing league: **{counts['missing_league']}**",
+        f"Missing jump link: **{counts['missing_jump']}**",
+    ]
+
+    if affected:
+        lines.append("\n**Recent Bets Needing Attention**")
+        for capper_name, issues, bet_text, jump_url in affected:
+            jump = f"[jump]({jump_url})" if jump_url else "jump unavailable"
+            lines.append(f"• **{capper_name}** — {', '.join(issues)} | {bet_text} | {jump}")
+    else:
+        lines.append("\n✅ No data issues found for this period.")
+
+    for chunk in split_discord_text("\n".join(lines)):
+        await ctx.send(chunk)
 
 
 # =====================
@@ -2523,7 +2859,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
         await ctx.send("You need the **Manage Server** permission to run that command.")
         return
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Missing argument. Example commands: `bt!sport WNBA`, `bt!player Paige Bueckers`, `bt!month 2026-07`")
+        await ctx.send("Missing argument. Try `bt!month 2026-07`, `bt!leaderboard MLB july`, or `bt!capper PropKitchen today`.")
         return
     raise error
 

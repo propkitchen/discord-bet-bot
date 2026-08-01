@@ -2841,6 +2841,7 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "Reply to a bet: `bt!setdate 2026-07-31`\n"
         "Reply to a bet: `bt!setodds +715` / `3x` / `2.50`\n"
         "`bt!backfill_wager_types 2026-07-01`\n"
+        "`bt!fix_sports 2026-07-01`\n"
         "`bt!data_issues 2026-07`\n"
         "`bt!fix_decimal_units` | `bt!fix_bet_dates`\n"
         "`bt!recalc_multipliers` | `bt!clear_pending_old`"
@@ -3296,6 +3297,120 @@ async def backfill_wager_types_cmd(
         f"Graded classifications: **{straight_count} straight**, "
         f"**{parlay_count} sportsbook parlays**, **{dfs_count} DFS slips**\n"
         "This reclassifies existing database rows only. It cannot create a bet that was never logged."
+    )
+
+
+@bot.command(name="fix_sports", aliases=["fixsports", "repair_sports", "backfill_sports"])
+@commands.has_permissions(manage_guild=True)
+async def fix_sports_cmd(
+    ctx: commands.Context,
+    start_date: str = DEFAULT_DFS_BACKFILL_DATE,
+) -> None:
+    """
+    Re-parse sport and league fields from saved wager text.
+
+    This repairs historical rows created by older versions that could classify WNBA
+    as NBA, and it attempts to resolve UNKNOWN rows when the original saved message
+    contains a recognizable sport or league. Rows without enough saved text remain
+    UNKNOWN rather than being guessed.
+    """
+    parsed_start = parse_date_yyyy_mm_dd(start_date)
+    if not parsed_start:
+        await ctx.send("Use format: `bt!fix_sports 2026-07-01`.")
+        return
+
+    cutoff = parsed_start.isoformat()
+    checked_bets = 0
+    updated_bets = 0
+    wnba_repairs = 0
+    unknown_resolved = 0
+    unresolved_unknown = 0
+
+    bet_rows = cur.execute(
+        """
+        SELECT id, content, market, odds_text, sport, league
+        FROM bets
+        WHERE COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    for bet_id, content, market, odds_text, old_sport, old_league in bet_rows:
+        checked_bets += 1
+        source_text = str(content or market or "")
+        fields = parse_analytics_fields(source_text, str(odds_text or ""))
+        parsed_sport = str(fields["sport"] or "UNKNOWN")
+        parsed_league = str(fields["league"] or "")
+        previous_sport = str(old_sport or "UNKNOWN")
+        previous_league = str(old_league or "")
+
+        # Do not erase a known historical sport when an old row has no recoverable text.
+        if parsed_sport == "UNKNOWN" and previous_sport not in {"", "UNKNOWN"}:
+            new_sport = previous_sport
+            new_league = previous_league
+        else:
+            new_sport = parsed_sport
+            new_league = parsed_league or (new_sport if new_sport != "UNKNOWN" else "")
+
+        if previous_sport == "NBA" and new_sport == "WNBA":
+            wnba_repairs += 1
+        if previous_sport in {"", "UNKNOWN"} and new_sport not in {"", "UNKNOWN"}:
+            unknown_resolved += 1
+        if new_sport in {"", "UNKNOWN"}:
+            unresolved_unknown += 1
+
+        if new_sport != previous_sport or new_league != previous_league:
+            cur.execute(
+                "UPDATE bets SET sport = ?, league = ? WHERE id = ?",
+                (new_sport, new_league, int(bet_id)),
+            )
+            updated_bets += 1
+
+    checked_pending = 0
+    updated_pending = 0
+    pending_rows = cur.execute(
+        """
+        SELECT message_id, content, market, odds_text, sport, league
+        FROM pending
+        WHERE COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    for message_id, content, market, odds_text, old_sport, old_league in pending_rows:
+        checked_pending += 1
+        source_text = str(content or market or "")
+        fields = parse_analytics_fields(source_text, str(odds_text or ""))
+        parsed_sport = str(fields["sport"] or "UNKNOWN")
+        parsed_league = str(fields["league"] or "")
+        previous_sport = str(old_sport or "UNKNOWN")
+        previous_league = str(old_league or "")
+
+        if parsed_sport == "UNKNOWN" and previous_sport not in {"", "UNKNOWN"}:
+            new_sport = previous_sport
+            new_league = previous_league
+        else:
+            new_sport = parsed_sport
+            new_league = parsed_league or (new_sport if new_sport != "UNKNOWN" else "")
+
+        if new_sport != previous_sport or new_league != previous_league:
+            cur.execute(
+                "UPDATE pending SET sport = ?, league = ? WHERE message_id = ?",
+                (new_sport, new_league, int(message_id)),
+            )
+            updated_pending += 1
+
+    conn.commit()
+    await ctx.send(
+        "✅ **Sport Repair Complete**\n"
+        f"Starting date: **{cutoff}**\n"
+        f"Graded bets checked: **{checked_bets}** | Updated: **{updated_bets}**\n"
+        f"WNBA bets moved out of NBA: **{wnba_repairs}**\n"
+        f"UNKNOWN sports resolved: **{unknown_resolved}**\n"
+        f"Still UNKNOWN: **{unresolved_unknown}**\n"
+        f"Pending bets checked: **{checked_pending}** | Updated: **{updated_pending}**\n"
+        "UNKNOWN means the saved post did not contain enough recognizable sport text. "
+        "Those rows are left unchanged instead of being guessed."
     )
 
 

@@ -54,7 +54,7 @@ except Exception:  # pragma: no cover
 PREFIX = "bt!"
 TOKEN = os.getenv("TOKEN")
 
-DB_PATH = "/var/data/bets.db"
+DB_PATH = os.getenv("DB_PATH", "/var/data/bets.db")
 REPORT_TZ = "America/New_York"
 
 SUMMARY_CHANNEL_ID = 1473454134689796146  # #bettingtracker

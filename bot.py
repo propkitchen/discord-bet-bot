@@ -1187,6 +1187,10 @@ async def post_period_summary(
     end_local: datetime,
 ) -> None:
     where_sql, params = date_window_where(start_local, end_local)
+    guild = getattr(channel, "guild", None)
+    if guild is not None:
+        where_sql = f"(guild_id = ?) AND ({where_sql})"
+        params = (int(guild.id), *params)
     await post_leaderboard(
         channel,
         title,
@@ -1771,6 +1775,9 @@ async def post_master_report(
 
     where_parts = ["LOWER(capper) = ?"]
     params: List[object] = [capper_name.lower()]
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_local, end_local)
     where_sql, final_params = build_where(where_parts, params)
     text = build_master_report_text(
@@ -2061,6 +2068,10 @@ async def post_query_summary(
     if error:
         await ctx.send(error)
         return
+
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_local, end_local)
     where_sql, final_params = build_where(where_parts, params)
     title = base_title if not label or label == "All-Time" else f"{base_title} — {label}"
@@ -2092,6 +2103,9 @@ async def post_leaderboard_query(
 
     where_parts: List[str] = []
     params: List[object] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     if sport_name:
         where_parts.append("UPPER(sport) = ?")
         params.append(sport_name.upper())
@@ -2266,6 +2280,7 @@ def resolve_capper_for_message(message: discord.Message) -> Optional[Capper]:
 
 def find_duplicate_message_id(
     message_id: int,
+    guild_id: int,
     capper_name: str,
     duplicate_key: str,
     created_utc: str,
@@ -2288,7 +2303,8 @@ def find_duplicate_message_id(
             f"""
             SELECT message_id
             FROM {table}
-            WHERE LOWER(capper) = ?
+            WHERE guild_id = ?
+              AND LOWER(capper) = ?
               AND duplicate_key = ?
               AND created_utc >= ?
               AND created_utc <= ?
@@ -2296,7 +2312,7 @@ def find_duplicate_message_id(
             ORDER BY created_utc DESC
             LIMIT 1
             """,
-            (capper_name.lower(), duplicate_key, cutoff, upper, int(message_id)),
+            (int(guild_id), capper_name.lower(), duplicate_key, cutoff, upper, int(message_id)),
         ).fetchone()
         if row:
             return int(row[0])
@@ -2323,6 +2339,7 @@ def insert_pending(
     duplicate_key = build_duplicate_key(content, created_utc, capper.name, risk, odds_text, fields)
     duplicate_message_id = find_duplicate_message_id(
         message_id,
+        guild_id,
         capper.name,
         duplicate_key,
         created_utc,
@@ -2395,7 +2412,7 @@ def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bo
     cur.execute(
         """
         UPDATE pending
-        SET capper = ?, capper_user_id = ?, author_user_id = ?, content = ?,
+        SET guild_id = ?, capper = ?, capper_user_id = ?, author_user_id = ?, content = ?,
             bet_date = ?, sport = ?, risk_units = ?, odds_text = ?, jump_url = ?,
             league = ?, event = ?, player = ?, team = ?, opponent = ?, bet_type = ?,
             market = ?, line = ?, sportsbook = ?, odds_format = ?, multiplier = ?,
@@ -2403,6 +2420,7 @@ def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bo
         WHERE message_id = ?
         """,
         (
+            int(message.guild.id if message.guild else 0),
             capper.name,
             int(capper.user_id),
             int(message.author.id),
@@ -4310,6 +4328,9 @@ async def export_cmd(ctx: commands.Context, *, query: str = "alltime") -> None:
     where_parts: List[str] = []
     params: List[object] = []
     labels: List[str] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     if capper:
         where_parts.append("LOWER(capper) = ?")
         params.append(capper.lower())
@@ -4551,6 +4572,9 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
 
     where_parts: List[str] = []
     params: List[object] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_l, end_l)
     where_sql, final_params = build_where(where_parts, params)
 

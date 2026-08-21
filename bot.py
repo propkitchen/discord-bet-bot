@@ -305,6 +305,7 @@ def ensure_schema() -> None:
         """
         CREATE TABLE IF NOT EXISTS pending (
             message_id INTEGER PRIMARY KEY,
+            guild_id INTEGER NOT NULL DEFAULT 0,
             channel_id INTEGER NOT NULL,
             capper TEXT NOT NULL,
             capper_user_id INTEGER NOT NULL,
@@ -340,6 +341,7 @@ def ensure_schema() -> None:
         CREATE TABLE IF NOT EXISTS bets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id INTEGER UNIQUE NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
             channel_id INTEGER NOT NULL,
             capper TEXT NOT NULL,
             capper_user_id INTEGER NOT NULL,
@@ -378,6 +380,7 @@ def ensure_schema() -> None:
 
     # Safe migrations for the existing Render database.
     pending_columns = {
+        "guild_id": "INTEGER NOT NULL DEFAULT 0",
         "bet_date": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
         "league": "TEXT NOT NULL DEFAULT ''",
@@ -401,6 +404,7 @@ def ensure_schema() -> None:
         add_column_if_missing("pending", col, definition)
 
     bet_columns = {
+        "guild_id": "INTEGER NOT NULL DEFAULT 0",
         "bet_date": "TEXT NOT NULL DEFAULT ''",
         "content": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
@@ -2301,6 +2305,7 @@ def find_duplicate_message_id(
 
 def insert_pending(
     message_id: int,
+    guild_id: int,
     channel_id: int,
     capper: Capper,
     author_user_id: int,
@@ -2329,16 +2334,17 @@ def insert_pending(
         """
         INSERT OR REPLACE INTO pending
         (
-            message_id, channel_id, capper, capper_user_id, author_user_id,
+            message_id, guild_id, channel_id, capper, capper_user_id, author_user_id,
             content, created_utc, bet_date, sport, risk_units, odds_text, jump_url,
             league, event, player, team, opponent, bet_type, market, line,
             sportsbook, odds_format, multiplier, wager_category, platform,
             platform_type, duplicate_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
+            int(guild_id),
             int(channel_id),
             capper.name,
             int(capper.user_id),
@@ -2454,7 +2460,7 @@ def grade_pending(
     row = cur.execute(
         """
         SELECT
-            channel_id, capper, capper_user_id, author_user_id, content, sport,
+            guild_id, channel_id, capper, capper_user_id, author_user_id, content, sport,
             risk_units, odds_text, created_utc, bet_date, jump_url, league, event,
             player, team, opponent, bet_type, market, line, sportsbook, odds_format,
             multiplier, wager_category, platform, platform_type, duplicate_key
@@ -2467,6 +2473,7 @@ def grade_pending(
         return False
 
     (
+        guild_id,
         channel_id,
         capper_name,
         capper_user_id,
@@ -2526,17 +2533,18 @@ def grade_pending(
         """
         INSERT OR REPLACE INTO bets
         (
-            message_id, channel_id, capper, capper_user_id, author_user_id, sport,
+    message_id, guild_id, channel_id, capper, capper_user_id, author_user_id, sport,
             risk_units, net_units, result, odds_text, created_utc, graded_utc,
             bet_date, content, jump_url, league, event, player, team, opponent,
             bet_type, market, line, sportsbook, odds_format, multiplier,
             wager_category, platform, platform_type, duplicate_key, grade_reaction,
             grader_user_id, admin_override
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
+            int(guild_id),
             int(channel_id),
             str(capper_name),
             int(capper_user_id),
@@ -2762,6 +2770,7 @@ async def on_message(message: discord.Message) -> None:
 
     inserted, duplicate_message_id = insert_pending(
         message.id,
+        message.guild.id if message.guild else 0,
         message.channel.id,
         capper,
         message.author.id,
@@ -2818,6 +2827,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
 
     inserted, duplicate_message_id = insert_pending(
         after.id,
+        after.guild.id if after.guild else 0,
         after.channel.id,
         capper,
         after.author.id,
@@ -2878,6 +2888,7 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
 
     inserted, duplicate_message_id = insert_pending(
         message.id,
+        message.guild.id if message.guild else 0,
         message.channel.id,
         capper,
         message.author.id,

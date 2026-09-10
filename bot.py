@@ -109,12 +109,11 @@ TRACKED_CHANNELS: Dict[int, Capper] = {
     1258244563726893106: Capper("hotshot", 475659527337934849),
     1281388388569579608: Capper("clipset", 684940092665757696),
     1278486906169987226: Capper("pxs", 933024893992329286),
-    1356017581558857796: Capper("mattlocks", 1242294328253218878),
     1344526479366688808: Capper("ballsout", 1345160333261668362),
     1409640332295147570: Capper("gr8", 1109269360037601411),
-    1430746272192659569: Capper("mikelocks", 1430751846125010970),
     1424256774692667422: Capper("betsbybray", 865284268745949194),
     1515610298696863885: Capper("DaijonBets", 1168899954660614155),
+    1492009669395480686: Capper("sgtprops", 495687263661850634),
 }
 
 
@@ -1827,15 +1826,12 @@ def capper_aliases() -> Dict[str, str]:
 
     aliases.setdefault("pk", "PropKitchen")
     aliases.setdefault("propkitchen", "PropKitchen")
-    aliases.setdefault("matt", "mattlocks")
-    aliases.setdefault("mattlocks", "mattlocks")
-    aliases.setdefault("mike", "mikelocks")
-    aliases.setdefault("mikelocks", "mikelocks")
     aliases.setdefault("bray", "betsbybray")
     aliases.setdefault("clip", "clipset")
     aliases.setdefault("clipset", "clipset")
     aliases.setdefault("daijon", "DaijonBets")
     aliases.setdefault("daijonbets", "DaijonBets")
+    aliases.setdefault("sgt", "sgtprops")
     return aliases
 
 
@@ -2771,12 +2767,9 @@ async def on_message(message: discord.Message) -> None:
     )
     if inserted:
         reaction_added = await safe_add_reaction(message, PENDING_REACTION)
-        if not reaction_added:
-            await send_temporary_notice(
-                message,
-                "⚠️ **The bet was saved, but I could not add 📝.**\n"
-                "Give BetTracker the **Add Reactions** and **Read Message History** permissions in this channel.",
-            )
+        # Keep automatic chat messages limited to wager-format problems. Permission issues
+        # are diagnosed on demand with `bt!trackcheck` instead of posting channel clutter.
+        _ = reaction_added
         await warn_about_tracked_format(message, content)
     elif duplicate_message_id is not None:
         await safe_add_reaction(message, DUPLICATE_REACTION)
@@ -2787,6 +2780,13 @@ async def on_message(message: discord.Message) -> None:
 async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
     if bot.user and after.author.id == bot.user.id:
         return
+
+    # Discord can emit message-update events for embed/link-preview changes even when the
+    # capper did not edit the wager text. Ignore those so reactions or background embed
+    # updates never trigger automatic "bet not tracked" / format notices.
+    if message_to_text(before) == message_to_text(after):
+        return
+
     if is_bot_command_message(after):
         return
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
@@ -2798,22 +2798,13 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
 
     content = message_to_text(after)
     if pending_exists(after.id):
-        if not refresh_pending_from_message(after, capper):
-            await send_temporary_notice(
-                after,
-                "❌ **Edit not applied: units are missing.** Keep `1u`, `0.5u`, etc. in the original post.",
-            )
-            return
-        await warn_about_tracked_format(after, content)
+        # Edits refresh silently. Automatic notices are reserved for newly posted
+        # malformed wagers so routine corrections/backlogs do not clutter channels.
+        refresh_pending_from_message(after, capper)
         return
 
     # A capper can correct a duplicate-flagged or incomplete post by editing it.
     if parse_risk_units(content) is None:
-        if looks_like_wager_message(after, content):
-            await send_temporary_notice(
-                after,
-                "❌ **Bet not tracked: units are missing.** Start with `1u`, `0.5u`, or `0.25u`.",
-            )
         return
 
     inserted, duplicate_message_id = insert_pending(
@@ -2828,12 +2819,9 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     if inserted:
         await safe_clear_reaction(after, DUPLICATE_REACTION)
         reaction_added = await safe_add_reaction(after, PENDING_REACTION)
-        if not reaction_added:
-            await send_temporary_notice(
-                after,
-                "⚠️ **The bet was saved, but I could not add 📝.** Check the bot's reaction permissions.",
-            )
-        await warn_about_tracked_format(after, content)
+        # Edits/backlogs should stay quiet. If 📝 cannot be added, `bt!trackcheck`
+        # can diagnose channel permissions without creating automatic chatter.
+        _ = reaction_added
     elif duplicate_message_id is not None:
         await safe_add_reaction(after, DUPLICATE_REACTION)
 
@@ -2859,21 +2847,12 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
 
     content = message_to_text(message)
     if pending_exists(payload.message_id):
-        if not refresh_pending_from_message(message, capper):
-            await send_temporary_notice(
-                message,
-                "❌ **Edit not applied: units are missing.** Keep the stake in the original post.",
-            )
-            return
-        await warn_about_tracked_format(message, content)
+        # Refresh silently. Automatic format notices are reserved for newly posted wagers,
+        # not raw/background Discord update events.
+        refresh_pending_from_message(message, capper)
         return
 
     if parse_risk_units(content) is None:
-        if looks_like_wager_message(message, content):
-            await send_temporary_notice(
-                message,
-                "❌ **Bet not tracked: units are missing.** Start with `1u`, `0.5u`, or `0.25u`.",
-            )
         return
 
     inserted, duplicate_message_id = insert_pending(
@@ -2888,12 +2867,9 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
     if inserted:
         await safe_clear_reaction(message, DUPLICATE_REACTION)
         reaction_added = await safe_add_reaction(message, PENDING_REACTION)
-        if not reaction_added:
-            await send_temporary_notice(
-                message,
-                "⚠️ **The bet was saved, but I could not add 📝.** Check the bot's reaction permissions.",
-            )
-        await warn_about_tracked_format(message, content)
+        # Do not post automatic format/permission chatter from raw message-update events.
+        # The wager is still saved; `bt!trackcheck` can diagnose reaction permissions.
+        _ = reaction_added
     elif duplicate_message_id is not None:
         await safe_add_reaction(message, DUPLICATE_REACTION)
 

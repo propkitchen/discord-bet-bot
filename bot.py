@@ -3140,41 +3140,52 @@ async def pending_cmd(ctx: commands.Context) -> None:
 
 
 async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tuple[object, ...], label: str) -> None:
-    rows = cur.execute(
+    # Keep this command fast even when hundreds of stale pending rows exist.
+    # We only collect a small set of the newest messages for cosmetic reaction cleanup.
+    count_row = cur.execute(
+        f"SELECT COUNT(*) FROM pending WHERE {where_sql}",
+        params,
+    ).fetchone()
+    pending_count = int(count_row[0] or 0) if count_row else 0
+
+    if pending_count == 0:
+        await ctx.send(f"📝 No pending bets found for **{label}**.")
+        return
+
+    recent_rows = cur.execute(
         f"""
-        SELECT message_id, channel_id, capper
+        SELECT message_id, channel_id
         FROM pending
         WHERE {where_sql}
+        ORDER BY created_utc DESC
+        LIMIT 50
         """,
         params,
     ).fetchall()
 
-    if not rows:
-        await ctx.send(f"📝 No pending bets found for **{label}**.")
-        return
+    # Database cleanup happens first so the command responds immediately and the
+    # cleared bets stop counting as pending right away. Graded history is untouched.
+    cur.execute(f"DELETE FROM pending WHERE {where_sql}", params)
+    conn.commit()
 
-    # Remove the 📝 reaction where possible. If Discord permissions fail, the DB cleanup still works.
-    reactions_cleared = 0
-    for message_id, channel_id, capper_name in rows:
+    await ctx.send(
+        f"✅ **Pending Cleared: {label}**\n"
+        f"Removed pending rows: **{pending_count}**\n"
+        "Graded bet history was **not** deleted.\n"
+        "Cleaning 📝 reactions from up to the 50 most recent cleared messages where possible."
+    )
+
+    # Best-effort cosmetic cleanup only. Old 📝 reactions may remain on historical
+    # Discord messages, but those messages are no longer pending in BetTracker.
+    for message_id, channel_id in recent_rows:
         channel = bot.get_channel(int(channel_id))
         if channel is None:
             continue
         try:
             msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
             await msg.clear_reaction(PENDING_REACTION)
-            reactions_cleared += 1
         except Exception:
             continue
-
-    cur.execute(f"DELETE FROM pending WHERE {where_sql}", params)
-    conn.commit()
-
-    await ctx.send(
-        f"✅ **Pending Cleared: {label}**\n"
-        f"Removed pending rows: **{len(rows)}**\n"
-        f"Removed 📝 reactions where possible: **{reactions_cleared}**\n"
-        "Graded bet history was **not** deleted."
-    )
 
 
 @bot.command(name="clear_pending")

@@ -200,10 +200,15 @@ def period_bounds_local(period: str, ref: Optional[date] = None) -> Tuple[dateti
 
 
 def parse_date_yyyy_mm_dd(value: str) -> Optional[date]:
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-    except Exception:
-        return None
+    """Accept full ISO, US-slash, US-dash, and written calendar dates."""
+    clean = (value or "").strip().replace(",", "")
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m/%d/%y",
+                    "%m-%d-%Y", "%m-%d-%y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(clean, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 def local_date_from_utc_iso(value: str) -> date:
@@ -1926,28 +1931,22 @@ def resolve_wager_category_from_tokens(tokens: List[str]) -> Tuple[Optional[str]
 def resolve_optional_filters(
     tokens: List[str],
 ) -> Tuple[Optional[str], Optional[str], List[str]]:
-    """Resolve one optional sport and one optional wager-category token in either order."""
-    remaining = list(tokens)
+    """Find one sport/category anywhere; preserve remaining date words."""
+    remaining = []
     sport: Optional[str] = None
     category: Optional[str] = None
-
-    for _ in range(2):
-        changed = False
+    for token in tokens:
         if sport is None:
-            candidate, rest = resolve_sport_from_tokens(remaining)
-            if candidate:
+            candidate, rest = resolve_sport_from_tokens([token])
+            if candidate and not rest:
                 sport = candidate
-                remaining = rest
-                changed = True
+                continue
         if category is None:
-            candidate, rest = resolve_wager_category_from_tokens(remaining)
-            if candidate:
+            candidate, rest = resolve_wager_category_from_tokens([token])
+            if candidate and not rest:
                 category = candidate
-                remaining = rest
-                changed = True
-        if not changed:
-            break
-
+                continue
+        remaining.append(token)
     return sport, category, remaining
 
 
@@ -1965,7 +1964,7 @@ def local_month_bounds(year: int, month: int) -> Tuple[datetime, datetime]:
     return start, end
 
 
-def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Optional[datetime], Optional[str]]:
+def parse_time_filter(raw: str, sport: Optional[str] = None) -> Tuple[Optional[str], Optional[datetime], Optional[datetime], Optional[str]]:
     text = normalize_space(raw).lower().replace("_", "-")
 
     if not text or text in {"all", "alltime", "all-time", "lifetime"}:
@@ -2000,7 +1999,44 @@ def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Opti
         start, end = period_bounds_local("monthly", ref)
         return f"Last Month ({start.year}-{start.month:02d})", start, end, None
 
-    range_tokens = text.replace("→", " ").replace(" through ", " ").replace(" to ", " ").split()
+    # Sports seasons need an explicitly verified opening date. Never guess one.
+    season_match = re.fullmatch(r"(?:season\s+)?(20\d{2})(?:-\d{2,4})?\s*(?:season)?", text)
+    if season_match and "season" in text:
+        year = int(season_match.group(1))
+        starts = {("NBA", 2026): date(2026, 10, 20)}
+        opening = starts.get(((sport or "").upper(), year))
+        if opening is None:
+            return None, None, None, (
+                "Unknown sport/season. Try `bt!capper PropKitchen NBA 2026 season`."
+            )
+        start, _unused = local_day_bounds(opening)
+        _unused, end = local_day_bounds(today)
+        return f"{sport.upper()} {year}-{str(year+1)[-2:]} Season", start, end, None
+
+    relative = re.fullmatch(r"(?:last|past)\s+(\d{1,3})\s*(?:days?|d)", text)
+    if relative:
+        count = int(relative.group(1))
+        if not 1 <= count <= 365:
+            return None, None, None, "Choose between 1 and 365 days."
+        start, _unused = local_day_bounds(today - timedelta(days=count - 1))
+        _unused, end = local_day_bounds(today)
+        return f"Last {count} days", start, end, None
+
+    named_month = re.fullmatch(r"([a-z]+)\s+(20\d{2})", text)
+    if named_month and named_month.group(1) in MONTH_NAMES:
+        year = int(named_month.group(2))
+        month = MONTH_NAMES[named_month.group(1)]
+        start, end = local_month_bounds(year, month)
+        return f"Month: {year}-{month:02d}", start, end, None
+
+    slash_month = re.fullmatch(r"(\d{1,2})/(20\d{2})", text)
+    if slash_month and 1 <= int(slash_month.group(1)) <= 12:
+        month, year = int(slash_month.group(1)), int(slash_month.group(2))
+        start, end = local_month_bounds(year, month)
+        return f"Month: {year}-{month:02d}", start, end, None
+
+    range_text = re.sub(r"\s+(?:through|to|[-–])\s+|\s*→\s*", " ", text)
+    range_tokens = range_text.split()
     if len(range_tokens) == 2:
         range_start = parse_date_yyyy_mm_dd(range_tokens[0])
         range_end = parse_date_yyyy_mm_dd(range_tokens[1])
@@ -2075,7 +2111,7 @@ async def post_query_summary(
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
 ) -> None:
-    label, start_local, end_local, error = parse_time_filter(time_text)
+    label, start_local, end_local, error = parse_time_filter(time_text, sport=sport_name)
     if error:
         await ctx.send(error)
         return
@@ -2107,7 +2143,7 @@ async def post_leaderboard_query(
     wager_category: Optional[str] = None,
     include_chart: bool = False,
 ) -> None:
-    label, start_local, end_local, error = parse_time_filter(time_text)
+    label, start_local, end_local, error = parse_time_filter(time_text, sport=sport_name)
     if error:
         await ctx.send(error)
         return
@@ -2156,7 +2192,7 @@ def split_name_and_time_filter(query: str) -> Tuple[str, str]:
     if not tokens:
         return "", ""
 
-    for suffix_len in range(min(3, len(tokens)), 0, -1):
+    for suffix_len in range(min(5, len(tokens)), 0, -1):
         candidate = " ".join(tokens[-suffix_len:])
         label, _start, _end, error = parse_time_filter(candidate)
         if error is None and label != "All-Time":
@@ -4466,7 +4502,7 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
 
     sport, category, remaining = resolve_optional_filters(remaining)
     remaining_text = " ".join(remaining).strip()
-    _whole_label, _whole_start, _whole_end, whole_time_error = parse_time_filter(remaining_text)
+    _whole_label, _whole_start, _whole_end, whole_time_error = parse_time_filter(remaining_text, sport=sport)
     if whole_time_error is None:
         search_text, time_text = "", remaining_text
     else:
@@ -4684,6 +4720,27 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        raw = ctx.message.content[len(ctx.prefix):].strip() if ctx.prefix else ""
+        tokens = split_args(raw)
+        if tokens:
+            recognized, _rest = resolve_capper_from_tokens(tokens)
+            if recognized:
+                await ctx.invoke(capper_cmd, query=raw)
+                return
+            sport, category, remaining = resolve_optional_filters(tokens)
+            time_text = " ".join(remaining)
+            if sport or category:
+                label, _start, _end, problem = parse_time_filter(time_text, sport=sport)
+                if problem is None:
+                    await post_leaderboard_query(ctx, time_text, sport_name=sport, wager_category=category)
+                    return
+            label, _start, _end, problem = parse_time_filter(raw)
+            if problem is None and label != "All-Time":
+                await post_leaderboard_query(ctx, raw)
+                return
+        await ctx.send("Unknown command. Try `bt!commands`, `bt!PropKitchen NBA October`, or `bt!last 14 days NBA`.")
+        return
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Server** permission to run that command.")
         return

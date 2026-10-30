@@ -2197,7 +2197,7 @@ def looks_like_wager_message(message: discord.Message, content: str) -> bool:
         return True
     upper = f" {content.upper()} "
     betting_signals = (
-        " OVER ", " UNDER ", " PARLAY", " SGP ", " DFS ", " ODDS",
+        " OVER ", " UNDER ", " PARLAY", " SGP ", " DFS ",
         " MONEYLINE", " SPREAD", " STRIKEOUT", " REBOUND", " ASSIST",
         " POINTS", " TOTAL BASE", " HITS ALLOWED", " PRA ", " MORE ", " LESS ",
     )

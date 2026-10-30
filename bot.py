@@ -117,6 +117,12 @@ TRACKED_CHANNELS: Dict[int, Capper] = {
     1515610298696863885: Capper("DaijonBets", 1168899954660614155),
 }
 
+# Preserve existing capper mappings and all historical records. Inactive
+# accounts cannot create new tracked wagers, but past bets remain searchable
+# and gradeable. Reactivate by removing the capper from this set.
+# pxs = Picks x Stevie (departed); the others are on hiatus.
+INACTIVE_CAPPER_NAMES = frozenset({"pxs", "daijonbets", "mikelocks", "mattlocks"})
+
 
 # =====================
 # DISCORD SETUP
@@ -1245,6 +1251,8 @@ def tracked_capper_display_names() -> List[str]:
     seen: set[str] = set()
     for capper in TRACKED_CHANNELS.values():
         key = capper.name.lower()
+        if key in INACTIVE_CAPPER_NAMES:
+            continue  # Hide zero-bet inactive cappers on current leaderboards.
         if key not in seen:
             seen.add(key)
             names.append(capper.name)
@@ -1848,12 +1856,14 @@ def capper_aliases() -> Dict[str, str]:
     aliases.setdefault("clipset", "clipset")
     aliases.setdefault("daijon", "DaijonBets")
     aliases.setdefault("daijonbets", "DaijonBets")
+    aliases.setdefault("stevie", "pxs")
+    aliases.setdefault("picksxstevie", "pxs")
     return aliases
 
 
 def capper_by_user_id(user_id: int) -> Optional[Capper]:
     for capper in TRACKED_CHANNELS.values():
-        if capper.user_id == int(user_id):
+        if capper.user_id == int(user_id) and capper.name.lower() not in INACTIVE_CAPPER_NAMES:
             return capper
     return None
 
@@ -2267,6 +2277,10 @@ def resolve_capper_for_message(message: discord.Message) -> Optional[Capper]:
     """
     if not is_trackable_channel(message.channel.id):
         return None
+
+    channel_capper = TRACKED_CHANNELS.get(int(message.channel.id))
+    if channel_capper and channel_capper.name.lower() in INACTIVE_CAPPER_NAMES:
+        return None  # Pause new posts in inactive capper dedicated channels.
 
     direct_capper = capper_by_user_id(message.author.id)
     if direct_capper:

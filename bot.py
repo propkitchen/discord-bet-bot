@@ -1446,11 +1446,12 @@ def fetch_recent_bets(
             COALESCE(platform, sportsbook, '')
         FROM bets
         WHERE {where_sql}
-        ORDER BY graded_utc ASC
+        ORDER BY graded_utc DESC
         LIMIT ?
         """,
         (*params, int(limit)),
     ).fetchall()
+    rows.reverse()  # Keep chronological display order for the newest matching bets.
     return [
         (
             str(graded),
@@ -2190,9 +2191,9 @@ def is_bot_command_message(message: discord.Message) -> bool:
 
 
 def looks_like_wager_message(message: discord.Message, content: str) -> bool:
-    if is_bot_command_message(message):
-        return False
-    if RE_UNITS.search(content) or parse_odds_text(content):
+    if is_bot_command_message(message) or getattr(message, "reference", None) is not None:
+        return False  # Replies and commands are not candidates for missing-units warnings.
+    if RE_UNITS.search(content):
         return True
     upper = f" {content.upper()} "
     betting_signals = (
@@ -2200,13 +2201,10 @@ def looks_like_wager_message(message: discord.Message, content: str) -> bool:
         " MONEYLINE", " SPREAD", " STRIKEOUT", " REBOUND", " ASSIST",
         " POINTS", " TOTAL BASE", " HITS ALLOWED", " PRA ", " MORE ", " LESS ",
     )
-    if any(signal in upper for signal in betting_signals):
-        return True
-    if infer_platform(content)[0]:
-        return True
-    # Screenshot-only bets should be warned in betting channels, but not in the
-    # Giveaways channel where normal promotional images may not be wagers.
-    return bool(message.attachments) and int(message.channel.id) != 1306857603598520352
+    # Odds alone, mentions of a sportsbook, or an unrelated image are not
+    # sufficient evidence that this is a malformed wager.
+    has_bet_context = any(signal in upper for signal in betting_signals) or bool(infer_platform(content)[0])
+    return has_bet_context and bool(parse_odds_text(content))
 
 
 def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str]:
@@ -2236,6 +2234,8 @@ def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str
 
 
 async def warn_about_tracked_format(message: discord.Message, content: str) -> None:
+    if getattr(message, "reference", None) is not None:
+        return  # Do not clutter reply threads with automatic format feedback.
     warnings = format_warnings_for_tracked_post(content, utc_iso(message.created_at))
     if not warnings:
         return
@@ -2657,7 +2657,7 @@ def ungrade_bet(message_id: int) -> bool:
             channel_id, capper, capper_user_id, author_user_id, content, sport,
             risk_units, odds_text, created_utc, bet_date, jump_url, league, event,
             player, team, opponent, bet_type, market, line, sportsbook, odds_format,
-            multiplier, wager_category, platform, platform_type, duplicate_key
+            multiplier, wager_category, platform, platform_type, duplicate_key, guild_id
         FROM bets
         WHERE message_id = ?
         """,
@@ -2675,9 +2675,9 @@ def ungrade_bet(message_id: int) -> bool:
             content, created_utc, bet_date, sport, risk_units, odds_text, jump_url,
             league, event, player, team, opponent, bet_type, market, line,
             sportsbook, odds_format, multiplier, wager_category, platform,
-            platform_type, duplicate_key
+            platform_type, duplicate_key, guild_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
@@ -2707,6 +2707,7 @@ def ungrade_bet(message_id: int) -> bool:
             str(row[23] or ""),
             str(row[24] or ""),
             str(row[25] or ""),
+            int(row[26]),
         ),
     )
     conn.commit()
@@ -2867,6 +2868,10 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
 
 @bot.event
 async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
+    # on_message_edit handles cached messages. Avoid processing the same
+    # update twice and sending duplicate warning replies.
+    if getattr(payload, "cached_message", None) is not None:
+        return
     if not is_trackable_channel(payload.channel_id) or bet_exists(payload.message_id):
         return
 
@@ -3193,13 +3198,19 @@ async def pending_cmd(ctx: commands.Context) -> None:
 
 
 async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tuple[object, ...], label: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("Run this command inside a Discord server.")
+        return
+
+    scoped_where_sql = f"guild_id = ? AND ({where_sql})"
+    scoped_params = (int(ctx.guild.id), *params)
     rows = cur.execute(
         f"""
         SELECT message_id, channel_id, capper
         FROM pending
-        WHERE {where_sql}
+        WHERE {scoped_where_sql}
         """,
-        params,
+        scoped_params,
     ).fetchall()
 
     if not rows:
@@ -3219,7 +3230,7 @@ async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tupl
         except Exception:
             continue
 
-    cur.execute(f"DELETE FROM pending WHERE {where_sql}", params)
+    cur.execute(f"DELETE FROM pending WHERE {scoped_where_sql}", scoped_params)
     conn.commit()
 
     await ctx.send(
@@ -4283,6 +4294,10 @@ async def force_sport_cmd(
 @bot.command(name="backup", aliases=["backupdb", "databasebackup"])
 @commands.has_permissions(manage_guild=True)
 async def backup_cmd(ctx: commands.Context) -> None:
+    if int(ctx.author.id) != int(ADMIN_USER_ID):
+        await ctx.send("Full database backups are restricted to the BetTracker platform owner. Use `bt!export` for server data.")
+        return
+
     timestamp = now_local().strftime("%Y%m%d_%H%M%S")
     filename = f"bettracker_backup_{timestamp}.db"
     temp_path = os.path.join("/tmp", filename)

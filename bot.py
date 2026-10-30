@@ -1570,30 +1570,39 @@ def append_stats(lines: List[str], stats: Dict[str, object]) -> None:
         ]
     )
 
+def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
+    """Remove presentation emojis and duplicate metadata from recap descriptions."""
+    description = display_bet_text(content, market, max_len=max_len + 80)
+    description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
+    description = re.sub(r":[A-Za-z0-9_]+:", "", description)
+    description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)
+    description = re.sub(r"(?i)\bOVER\s*(?=\d|\.)", "o", description)
+    description = re.sub(r"(?i)\bUNDER\s*(?=\d|\.)", "u", description)
+    description = normalize_space(description).strip(" |:-")
+    if len(description) > max_len:
+        description = description[:max_len - 3].rstrip() + "..."
+    return description or "Bet details unavailable"
+
+
 def build_bet_result_line(
     row: Tuple[str, str, str, float, float, str, str, str, str, str, str, str],
     include_capper: bool = False,
 ) -> str:
     _graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
-    description = display_bet_text(content, market)
-    jump = f"[jump]({jump_url})" if jump_url else "jump unavailable"
-    prefix = f"{icon} {format_compact_units(risk)}"
+    description = compact_bet_description(content, market)
+    parts = [icon]
     if include_capper:
-        prefix = f"{icon} **{capper}** | {format_compact_units(risk)}"
-
-    if category == WAGER_DFS:
-        platform_part = f"{platform} | " if platform and platform.lower() not in description.lower() else ""
-        odds_part = format_odds_display(odds)
-        return (
-            f"{prefix} | {platform_part}{description} | {odds_part} | {sport} | "
-            f"{format_compact_units(net, signed=True)} | {jump}"
-        )
-
-    return (
-        f"{prefix} | {description} | Odds: {format_odds_display(odds)} | {sport} | "
-        f"{format_compact_units(net, signed=True)} | {jump}"
-    )
+        parts.append(f"**{capper}**")
+    parts += [format_compact_units(risk), description, format_odds_display(odds),
+              format_compact_units(net, signed=True)]
+    if jump_url and str(jump_url).startswith("https://discord.com/channels/"):
+        parts.append(f"[jump]({jump_url})")
+    elif jump_url:
+        parts.append(f"[jump]({jump_url})")
+    else:
+        parts.append("jump unavailable")
+    return " | ".join(parts)
 
 
 def build_filtered_summary_text(
@@ -3177,7 +3186,7 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "**Posting Help**\n"
         "`bt!format straight` | `bt!format parlay` | `bt!format dfs`\n"
         "Grades: ✅ win | ❌ loss | ➖ push | ↩️ void/refund\n"
-        "`bt!trackcheck`\n\n"
+        "`bt!trackcheck` | `bt!pending` | `bt!pending all` | `bt!pending gr8`\n\n"
         "**Admin**\n"
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"
         "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`\n"
@@ -3225,26 +3234,75 @@ async def date_cmd(ctx: commands.Context, date_arg: str) -> None:
     await post_leaderboard_query(ctx, date_arg)
 
 
-@bot.command(name="pending")
-async def pending_cmd(ctx: commands.Context) -> None:
-    rows = cur.execute(
-        """
-        SELECT capper, COUNT(*)
-        FROM pending
-        GROUP BY capper
-        ORDER BY COUNT(*) DESC
-        """
-    ).fetchall()
-
-    total = sum(int(count or 0) for _, count in rows)
-    if not rows:
-        await ctx.send("📝 **Pending Bets:** 0")
+@bot.command(name="pending", aliases=["ungraded", "openbets", "unsettled"])
+async def pending_cmd(ctx: commands.Context, *, query: str = "") -> None:
+    """Find ungraded wagers with direct links to react on the original post."""
+    if ctx.guild is None:
+        await ctx.send("Run this inside the Discord server.")
         return
 
-    lines = [f"📝 **Pending Bets:** {total}"]
-    for capper_name, count in rows:
-        lines.append(f"**{capper_name}**: {int(count)}")
-    await ctx.send("\n".join(lines))
+    tokens = split_args(query)
+    page = 1
+    if tokens and tokens[-1].isdigit():
+        page = int(tokens.pop())
+    if not 1 <= page <= 100:
+        await ctx.send("Use a page number from 1 to 100.")
+        return
+
+    filter_text = " ".join(tokens).strip()
+    capper_name: Optional[str] = None
+    if filter_text.lower() not in {"all", "everyone", "team"}:
+        if filter_text:
+            capper_name, extra = resolve_capper_from_tokens(tokens)
+            if capper_name is None or extra:
+                await ctx.send("Use `bt!pending`, `bt!pending all`, `bt!pending gr8`, or `bt!pending all 2`.")
+                return
+        else:
+            registered = capper_by_user_id(ctx.author.id)
+            if registered is not None:
+                capper_name = registered.name
+
+    where_sql = "guild_id = ?"
+    params: List[object] = [int(ctx.guild.id)]
+    if capper_name:
+        where_sql += " AND LOWER(capper) = ?"
+        params.append(capper_name.lower())
+
+    count = int(cur.execute(
+        f"SELECT COUNT(*) FROM pending WHERE {where_sql}", tuple(params)
+    ).fetchone()[0])
+    rows = cur.execute(
+        f"""
+        SELECT capper, risk_units, content, market, jump_url, channel_id, message_id
+        FROM pending
+        WHERE {where_sql}
+        ORDER BY created_utc DESC, message_id DESC
+        LIMIT 20 OFFSET ?
+        """,
+        (*params, (page - 1) * 20),
+    ).fetchall()
+
+    label = capper_name or "All Cappers"
+    if count == 0:
+        await ctx.send(f"📝 **Ungraded Bets — {label}: 0**")
+        return
+    if not rows:
+        await ctx.send(f"No bets on page {page}. There are {count} ungraded bets.")
+        return
+
+    lines = [f"📝 **Ungraded Bets — {label}** | {count} pending | Page {page}"]
+    for name, risk, content, market, jump_url, channel_id, message_id in rows:
+        desc = compact_bet_description(str(content or ""), str(market or ""), max_len=82)
+        url = str(jump_url or "").strip()
+        if not url.startswith("https://discord.com/channels/"):
+            url = f"https://discord.com/channels/{int(ctx.guild.id)}/{int(channel_id)}/{int(message_id)}"
+        capper_label = f"**{name}** | " if not capper_name else ""
+        lines.append(f"• {capper_label}{format_compact_units(float(risk))} | {desc} | [jump]({url})")
+    if page * 20 < count:
+        suffix = (capper_name or "all") + f" {page + 1}"
+        lines.append(f"Next page: `bt!pending {suffix}`")
+    for chunk in split_discord_text("\n".join(lines)):
+        await ctx.send(chunk)
 
 
 async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tuple[object, ...], label: str) -> None:

@@ -4500,6 +4500,69 @@ async def force_sport_cmd(
     )
 
 
+@bot.command(name="migrateguild", aliases=["previewguildmigration"])
+@commands.has_permissions(manage_guild=True)
+async def migrateguild_cmd(ctx: commands.Context, mode: str = "preview") -> None:
+    """Owner-only preview/confirm repair of legacy guild_id=0 rows."""
+    if ctx.guild is None or int(ctx.author.id) != int(ADMIN_USER_ID):
+        await ctx.send("Only the BetTracker platform owner may migrate historical records.")
+        return
+    mode = mode.lower().strip()
+    if mode not in {"preview", "confirm"}:
+        await ctx.send("Use `bt!migrateguild preview` or `bt!migrateguild CONFIRM`.")
+        return
+
+    # Prove that a legacy row belongs to this guild using a valid Discord
+    # jump URL, or a configured tracker channel actually found in this guild.
+    registered_ids = set(TRACKED_CHANNELS) | set(SHARED_TRACKING_CHANNEL_IDS)
+    valid_channels = sorted(
+        channel_id for channel_id in registered_ids
+        if ctx.guild.get_channel(channel_id) is not None
+    )
+    filters = ["jump_url LIKE ?"]
+    values: List[object] = [f"https://discord.com/channels/{int(ctx.guild.id)}/%"]
+    if valid_channels:
+        filters.append("channel_id IN (" + ",".join("?" for _ in valid_channels) + ")")
+        values.extend(valid_channels)
+    match_sql = "(" + " OR ".join(filters) + ")"
+
+    counts = {}
+    for table in ("bets", "pending"):
+        counts[table] = int(cur.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE guild_id = 0 AND {match_sql}",
+            tuple(values),
+        ).fetchone()[0])
+
+    if mode == "preview":
+        await ctx.send(
+            f"🔎 **Legacy Data Migration Preview**\n"
+            f"Server: **{ctx.guild.name}** (`{ctx.guild.id}`)\n"
+            f"Historical graded bets: **{counts['bets']}**\n"
+            f"Historical pending bets: **{counts['pending']}**\n"
+            f"Verified configured channels: **{len(valid_channels)}**\n"
+            "No data changed. Back up the database first. Then run "
+            "`bt!migrateguild CONFIRM` in this same server."
+        )
+        return
+
+    if counts["bets"] + counts["pending"] == 0:
+        await ctx.send("✅ No qualifying legacy records need migration.")
+        return
+
+    changes = {}
+    for table in ("bets", "pending"):
+        changes[table] = cur.execute(
+            f"UPDATE {table} SET guild_id = ? WHERE guild_id = 0 AND {match_sql}",
+            (int(ctx.guild.id), *values),
+        ).rowcount
+    conn.commit()
+    await ctx.send(
+        f"✅ **Historical server migration completed**\n"
+        f"Graded bets: **{changes['bets']}** | Pending: **{changes['pending']}**\n"
+        "Unverified legacy records were left untouched."
+    )
+
+
 @bot.command(name="backup", aliases=["backupdb", "databasebackup"])
 @commands.has_permissions(manage_guild=True)
 async def backup_cmd(ctx: commands.Context) -> None:
@@ -4899,6 +4962,9 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
                 await post_leaderboard_query(ctx, raw)
                 return
         await ctx.send("Unknown command. Try `bt!commands`, `bt!PropKitchen NBA October`, or `bt!last 14 days NBA`.")
+        return
+    if isinstance(error, commands.CheckFailure) and ctx.guild is None:
+        await ctx.send("BetTracker commands must be used inside a Discord server.")
         return
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Server** permission to run that command.")

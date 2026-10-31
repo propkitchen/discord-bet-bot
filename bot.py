@@ -807,7 +807,14 @@ def infer_wager_category(text: str, odds_text: str, platform_type: str, bet_type
         or re.search(r"(?<![A-Z0-9])DFS\s+SLIP(?![A-Z0-9])", upper)
     ):
         return WAGER_DFS
-    if bet_type == "Parlay" or "PARLAY" in upper or "SAME GAME PARLAY" in upper or " SGP " in f" {upper} ":
+    # A sportsbook/exchange "lotto" is a multi-leg parlay, even when
+    # the capper does not write the word "parlay". A single-player
+    # "double-double" prop alone is NOT evidence of multiple legs.
+    if (
+        bet_type == "Parlay"
+        or re.search(r"(?<![A-Z0-9])(?:PARLAY|SGP|LOTTO)(?![A-Z0-9])", upper)
+        or "SAME GAME" in upper and "BUILDER" in upper
+    ):
         return WAGER_PARLAY
     return WAGER_STRAIGHT
 
@@ -1130,11 +1137,18 @@ def generate_units_chart(
 
 WAGER_CATEGORY_SQL = """
 CASE
-    WHEN UPPER(COALESCE(wager_category, '')) IN ('STRAIGHT', 'SPORTSBOOK_PARLAY', 'DFS')
-        THEN UPPER(wager_category)
-    WHEN LOWER(COALESCE(odds_text, '')) LIKE '%x'
+    -- DFS is the highest-priority category, including old DFS slips.
+    WHEN UPPER(COALESCE(wager_category, '')) = 'DFS'
+      OR UPPER(COALESCE(platform_type, '')) = 'DFS_APP'
+      OR LOWER(COALESCE(odds_text, '')) LIKE '%x'
         THEN 'DFS'
-    WHEN LOWER(COALESCE(bet_type, '')) = 'parlay'
+    -- A historical sportsbook lotto may have been stored as STRAIGHT.
+    -- Correct its report classification without modifying any bet rows.
+    WHEN UPPER(COALESCE(wager_category, '')) = 'SPORTSBOOK_PARLAY'
+      OR LOWER(COALESCE(bet_type, '')) = 'parlay'
+      OR LOWER(' ' || COALESCE(content, '') || ' ') LIKE '% lotto%'
+      OR LOWER(' ' || COALESCE(content, '') || ' ') LIKE '% parlay%'
+      OR LOWER(' ' || COALESCE(content, '') || ' ') LIKE '% sgp%'
         THEN 'SPORTSBOOK_PARLAY'
     ELSE 'STRAIGHT'
 END
@@ -1712,6 +1726,20 @@ SPORT_RECAP_ORDER = (
 )
 
 
+SPORT_RECAP_EMOJI = {
+    "NBA": "🏀", "WNBA": "🏀", "NCAAB": "🏀",
+    "NFL": "🏈", "NCAAF": "🏈",
+    "MLB": "⚾", "NHL": "🏒", "SOCCER": "⚽",
+    "TENNIS": "🎾", "GOLF": "⛳", "UFC": "🥊",
+    "MMA": "🥊", "BOXING": "🥊",
+    "MIXED": "🧩", "UNKNOWN": "🔎",
+}
+
+
+def sport_recap_emoji(sport: str) -> str:
+    return SPORT_RECAP_EMOJI.get(str(sport).upper(), "🎯")
+
+
 def recap_sport_order(label: str) -> Tuple[int, str]:
     name = (label or "UNKNOWN").upper()
     return (
@@ -1778,7 +1806,7 @@ def build_filtered_summary_text(
             heading = sport
         lines.extend([
             "",
-            f"🏟️ **{heading}**",
+            f"{sport_recap_emoji(sport)} **{heading}**",
             f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%) | Bets: **{int(sport_stats['total'])}**",
             f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
         ])

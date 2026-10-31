@@ -31,10 +31,15 @@ def isolate(name, **values):
 
 class NovemberCommandTests(unittest.TestCase):
     def test_compact_recap_line(self):
+        aliases = next(n for n in TREE.body if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "RECAP_MARKET_ABBREVIATIONS"
+            for t in n.targets
+        ))
         clean = isolate(
             "compact_bet_description",
             display_bet_text=lambda content, market, max_len=95: content,
             normalize_space=lambda s: " ".join(s.split()), re=re,
+            RECAP_MARKET_ABBREVIATIONS=ast.literal_eval(aliases.value),
         )
         row_fn = isolate(
             "build_bet_result_line",

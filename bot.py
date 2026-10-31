@@ -48,6 +48,7 @@ from bettracker_autoclean import (
     set_retention_days,
 )
 from bettracker_excel import export_xlsx
+from bettracker_ladders import has_multiple_staked_lines, is_ladder_post, parse_ladder_post
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -506,6 +507,25 @@ def ensure_schema() -> None:
     conn.commit()
     # A separate lightweight queue; existing graded/pending wager data is unchanged.
     ensure_autoclean_schema(conn)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ladder_sources (
+            source_message_id INTEGER PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            capper_user_id INTEGER NOT NULL,
+            rung_count INTEGER NOT NULL,
+            created_utc TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ladder_rungs (
+            source_message_id INTEGER NOT NULL,
+            rung_number INTEGER NOT NULL,
+            tracked_message_id INTEGER NOT NULL UNIQUE,
+            PRIMARY KEY (source_message_id, rung_number)
+        )
+    """)
+    conn.commit()
 
 
 ensure_schema()
@@ -1726,15 +1746,48 @@ def append_stats(lines: List[str], stats: Dict[str, object]) -> None:
         ]
     )
 
+RECAP_MARKET_ABBREVIATIONS = (
+    (r"(?i)\bpoints\b", "Pts"),
+    (r"(?i)\brebounds\b", "Reb"),
+    (r"(?i)\bassists\b", "Ast"),
+    (r"(?i)\breceptions\b", "Rec"),
+    (r"(?i)\breceiving\s+yards\b", "Rec Yds"),
+    (r"(?i)\brushing\s+yards\b", "Rush Yds"),
+    (r"(?i)\bpassing\s+yards\b", "Pass Yds"),
+    (r"(?i)\bpassing\s+touchdowns\b", "Pass TDs"),
+    (r"(?i)\brushing\s+touchdowns\b", "Rush TDs"),
+    (r"(?i)\btotal\s+bases\b", "TB"),
+    (r"(?i)\bstrikeouts\b", "Ks"),
+    (r"(?i)\bshots\s+on\s+goal\b", "SOG"),
+)
+
+
 def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
-    """Remove presentation emojis and duplicate metadata from recap descriptions."""
-    description = display_bet_text(content, market, max_len=max_len + 80)
+    """Compact wager-only text. Remove odds, site labels and broken punctuation."""
+    description = display_bet_text(content, market, max_len=max_len + 100)
     description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
     description = re.sub(r":[A-Za-z0-9_]+:", "", description)
     description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)
+    description = re.sub(r"\(\s*(?:\|)?\s*$", "", description)
+    description = re.sub(r"\|\s*$", "", description)
+    description = re.sub(
+        r"(?i)\(\s*(?:Onyx|FanDuel|DraftKings|Hard Rock|BetMGM|"
+        r"Caesars|Bet365|Fanatics|ESPN BET)\s*\)?\s*$", "", description
+    )
+    description = re.sub(
+        r"(?i)(?:\s*\|\s*|\s+)(?:Onyx|FanDuel|DraftKings|Hard Rock|"
+        r"BetMGM|Caesars|Bet365|Fanatics|ESPN BET)\s*$", "", description
+    )
+    description = re.sub(
+        r"(?i)^(?:NBA|WNBA|NFL|NCAAF|CFB|CBB|NCAAB|MLB|NHL)\s+",
+        "", description,
+    )
+    description = re.sub(r"\s*\|\s*", " ", description)
     description = re.sub(r"(?i)\bOVER\s*(?=\d|\.)", "o", description)
     description = re.sub(r"(?i)\bUNDER\s*(?=\d|\.)", "u", description)
-    description = normalize_space(description).strip(" |:-")
+    for pattern, replacement in RECAP_MARKET_ABBREVIATIONS:
+        description = re.sub(pattern, replacement, description)
+    description = normalize_space(description).strip(" |:()-")
     if len(description) > max_len:
         description = description[:max_len - 3].rstrip() + "..."
     return description or "Bet details unavailable"
@@ -1759,31 +1812,22 @@ def build_bet_result_line(
     graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform, bet_date = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
     if category == WAGER_DFS:
-        # Keep the capper's DFS recap as clean as "✅ 10/4 | 0.3u | PrizePicks | 2.1x".
-        # Never echo decorative post emojis or a long list of individual legs.
-        date_text = format_recap_wager_date(bet_date, graded)
-        prefix = f"{icon} **{capper}**" if include_capper else f"{icon} {date_text}"
-        parts = [prefix]
-        if include_capper:
-            parts.append(date_text)
-        parts.extend([
-            format_compact_units(risk),
-            platform or "DFS Slip",
-            format_odds_display(odds),
-        ])
+        detail = [format_compact_units(risk), platform or "DFS Slip", format_odds_display(odds)]
     else:
-        parts = [icon]
-        if include_capper:
-            parts.append(f"**{capper}**")
-        parts.extend([
+        detail = [
             format_compact_units(risk),
             compact_bet_description(content, market),
             format_odds_display(odds),
-        ])
-
-    parts.append(format_compact_units(net, signed=True))
-    parts.append(f"[jump]({jump_url})" if str(jump_url or "").startswith("https://discord.com/channels/") else "jump unavailable")
-    return " | ".join(parts)
+        ]
+    if include_capper:
+        detail.insert(0, f"**{capper}**")
+    detail.extend([
+        format_compact_units(net, signed=True),
+        f"[jump]({jump_url})"
+        if str(jump_url or "").startswith("https://discord.com/channels/")
+        else "jump unavailable",
+    ])
+    return f"{icon} " + " | ".join(detail)
 
 
 SPORT_RECAP_ORDER = (
@@ -1846,7 +1890,7 @@ def build_filtered_summary_text(
 
     lines.extend([
         "",
-        f"**OVERALL** — {overall['record']} ({float(overall['win_pct']):.1f}%) | {total} bets",
+        f"**OVERALL** — **{overall['record']}** ({float(overall['win_pct']):.1f}%) | {total} bets",
         f"Risked: {float(overall['risk']):.2f}u | Net: **{float(overall['net']):+.2f}u** | ROI: **{float(overall['roi']):.1f}%**",
     ])
     if int(overall.get("voids", 0)):
@@ -1856,7 +1900,7 @@ def build_filtered_summary_text(
 
     bets = fetch_recent_bets(where_sql, params, limit=page_size, offset=(page - 1) * page_size)
     if max_pages == 1:
-        lines.append(f"\n**Wager details** ({total} bets)")
+        lines.append("\n**PLAYS**")
     else:
         lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
     if max_pages > 1:
@@ -1873,12 +1917,14 @@ def build_filtered_summary_text(
             heading = f"{sport} — Check classification"
         else:
             heading = sport
-        lines.extend([
-            "",
-            f"{sport_recap_emoji(sport)} **{heading}**",
-            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%) | Bets: **{int(sport_stats['total'])}**",
-            f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
-        ])
+        # A single-sport recap already shows the same numbers in OVERALL.
+        # Avoid making readers scan duplicate record, ROI and risk lines.
+        lines.extend(["", f"{sport_recap_emoji(sport)} **{heading}**"])
+        if len(sports) > 1:
+            lines.extend([
+                f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%)",
+                f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
+            ])
         # Full single-sport totals are counted here; a multi-sport slip belongs
         # to MIXED ONLY, never credited to two sport sections.
         category_where = f"({where_sql}) AND UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN')) = ?"
@@ -1898,7 +1944,7 @@ def build_filtered_summary_text(
             lines.append(
                 f"**{wager_category_label(category)}** — "
                 f"{stats['record']} | {float(stats['net']):+.2f}u | "
-                f"ROI {float(stats['roi']):.1f}% | {int(stats['total'])} bets"
+                f"ROI {float(stats['roi']):.1f}%"
             )
             lines.extend(build_bet_result_line(row, include_capper=not bool(capper_name))
                          for row in category_rows)
@@ -1931,7 +1977,7 @@ async def post_filtered_summary(
         filter_label=filter_label,
         page=page,
     )
-    await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS")
+    await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  RECAP")
 
     # Only substantive multi-day or multi-sport summaries get an extra image.
     # Images list actual plays, with complete odds/net/jump details above.
@@ -2065,7 +2111,7 @@ async def post_master_report(
         where_sql,
         final_params,
     )
-    await send_styled_report(ctx, text, heading=f"{capper_name}  /  PERFORMANCE REPORT")
+    await send_styled_report(ctx, text, heading=f"{capper_name}  /  RECAP")
 
 
 # =====================
@@ -3228,6 +3274,120 @@ async def before_autoclean_loop() -> None:
 
 
 # =====================
+# MULTI-RUNG LADDER TRACKING
+# =====================
+
+def ladder_source_exists(message_id: int) -> bool:
+    return cur.execute(
+        "SELECT 1 FROM ladder_sources WHERE source_message_id = ?",
+        (int(message_id),),
+    ).fetchone() is not None
+
+
+async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
+    """One original capper post -> one separately gradeable bot reply per rung."""
+    content = message_to_text(message)
+    if not is_ladder_post(content):
+        return False
+    try:
+        ladder = parse_ladder_post(content)
+    except ValueError as exc:
+        await send_temporary_notice(
+            message,
+            f"🪜 **Ladder not tracked:** {exc}\n"
+            "Add NFL, CFB, NBA, etc. to the heading and keep 2–8 "
+            "individually priced lines. Nothing was saved.",
+        )
+        return True
+
+    if message.guild is None:
+        return True
+
+    # A lone football/basketball emoji is not an unambiguous league.
+    context = ladder.preface + "\n" + "\n".join(r.line for r in ladder.rungs)
+    specific_sports = [
+        item for item in infer_sports(context)
+        if item not in {"FOOTBALL", "BASKETBALL", "SOFTBALL"}
+    ]
+    if len(specific_sports) != 1:
+        await send_temporary_notice(
+            message,
+            "🪜 **Ladder not tracked:** include one clear league or player "
+            "in the heading (NFL, CFB, NBA, etc.). "
+            "This avoids recording an ambiguous ladder in the wrong sport.",
+        )
+        return True
+
+    # Persist source BEFORE replies to prevent duplicate event submissions.
+    cursor = cur.execute(
+        """
+        INSERT OR IGNORE INTO ladder_sources
+        (source_message_id, guild_id, channel_id, capper_user_id, rung_count, created_utc)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(message.id), int(message.guild.id), int(message.channel.id),
+            int(capper.user_id), len(ladder.rungs), utc_iso(message.created_at),
+        ),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return True
+
+    successes = 0
+    for rung in ladder.rungs:
+        inherited = f"{ladder.preface}\n{rung.line}"
+        reply_text = (
+            f"🪜 **LADDER {rung.number}/{len(ladder.rungs)} — "
+            f"{capper.name}**\n{inherited}"
+        )
+        try:
+            child = await message.reply(
+                reply_text,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as exc:
+            print(f"Could not publish ladder rung: {type(exc).__name__}: {exc}")
+            break
+
+        inserted, duplicate_id = insert_pending(
+            child.id, int(message.guild.id), int(message.channel.id),
+            capper, message.author.id, inherited, utc_iso(message.created_at),
+            child.jump_url,
+        )
+        if not inserted:
+            try:
+                await child.delete()
+            except discord.HTTPException:
+                pass
+            print(f"Ladder rung duplicate/invalid: source={message.id} rung={rung.number}")
+            continue
+
+        cur.execute(
+            """INSERT OR IGNORE INTO ladder_rungs
+               (source_message_id, rung_number, tracked_message_id)
+               VALUES (?, ?, ?)""",
+            (int(message.id), rung.number, int(child.id)),
+        )
+        conn.commit()
+        successes += 1
+        await safe_add_reaction(child, PENDING_REACTION)
+
+    if successes == len(ladder.rungs):
+        await safe_add_reaction(message, "🪜")
+    else:
+        await send_temporary_notice(
+            message,
+            f"⚠️ **Ladder partially tracked:** {successes}/{len(ladder.rungs)} "
+            "rungs were saved. Do not repost or grade the original ladder. "
+            "Grade only the individual rung replies, and contact an admin "
+            "to resolve any missing rungs.",
+        )
+    return True
+
+
+# =====================
 # EVENTS
 # =====================
 
@@ -3277,6 +3437,19 @@ async def on_message(message: discord.Message) -> None:
         return
 
     content = message_to_text(message)
+    if is_ladder_post(content):
+        await track_ladder_post(message, capper)
+        await bot.process_commands(message)
+        return
+    if has_multiple_staked_lines(content):
+        await send_temporary_notice(
+            message,
+            "⚠️ **Multiple wagers found in one message, none tracked.** "
+            "For a ladder, add LADDER or 🪜 and a league in the heading. "
+            "Otherwise post each bet separately to grade it independently.",
+        )
+        return
+
     if parse_risk_units(content) is None:
         if looks_like_wager_message(message, content):
             await send_temporary_notice(
@@ -3322,12 +3495,24 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
         return
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
         return
+    if ladder_source_exists(after.id):
+        await send_temporary_notice(
+            after, "🪜 This ladder already created separately tracked replies. "
+            "Editing the original does not update their odds or stakes. "
+            "Contact an admin to correct a rung.",
+        )
+        return
 
     capper = resolve_capper_for_message(after)
     if capper is None:
         return
 
     content = message_to_text(after)
+    if is_ladder_post(content):
+        await track_ladder_post(after, capper)
+        return
+    if has_multiple_staked_lines(content):
+        return
     if pending_exists(after.id):
         refresh_pending_from_message(after, capper)
         return
@@ -3360,6 +3545,8 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
     if not is_trackable_channel(payload.channel_id) or bet_exists(payload.message_id):
         return
+    if ladder_source_exists(payload.message_id):
+        return
 
     channel = bot.get_channel(payload.channel_id)
     if channel is None:
@@ -3377,6 +3564,11 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
 
     content = message_to_text(message)
+    if is_ladder_post(content):
+        await track_ladder_post(message, capper)
+        return
+    if has_multiple_staked_lines(content):
+        return
     if pending_exists(payload.message_id):
         refresh_pending_from_message(message, capper)
         return
@@ -3581,6 +3773,13 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         "straight": f"1u | MLB | Player o5.5 Strikeouts | Odds: -120 | {short_date}",
         "parlay": f"0.5u | MLB | Parlay: Leg 1 + Leg 2 | Odds: +180 | {short_date}",
         "dfs": f"0.5u | DFS | Sleeper | Leg 1 + Leg 2 | 1.88x | MLB | {short_date}",
+        "ladder": (
+            "NFL Drake Maye Pass Yards Ladder 🪜\n"
+            ".75u 225+ Pass Yards (-110)\n"
+            ".5u 250+ Pass Yards (+120) 🪜\n"
+            ".25u 300+ Pass Yards (+240) 🪜\n"
+            ".1u 350+ Pass Yards (+500) 🪜"
+        ),
     }
     if key in templates:
         await ctx.send(f"🧾 **{key.upper()} FORMAT**\n{templates[key]}")
@@ -3590,7 +3789,7 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         f"Straight: {templates['straight']}\n"
         f"Parlay: {templates['parlay']}\n"
         f"DFS: {templates['dfs']}\n\n"
-        "Use `bt!format straight`, `bt!format parlay`, or `bt!format dfs`."
+        "Use bt!format straight, parlay, dfs, or ladder."
     )
 
 
@@ -3614,6 +3813,8 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "**Posting Help**\n"
         "`bt!format straight` | `bt!format parlay` | `bt!format dfs`\n"
         "Grades: ✅ win | ❌ loss | ➖ push | ↩️ void/refund\n"
+        "Ladders: `bt!format ladder` — add a clear league and 🪜, "
+        "then grade each bot rung reply separately.\n"
         "`bt!trackcheck` | `bt!pending` | `bt!pending all` | `bt!pending gr8`\n\n"
         "**Admin**\n"
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"

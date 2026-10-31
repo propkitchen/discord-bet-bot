@@ -37,6 +37,7 @@ import time
 
 from bettracker_autoclean import (
     DEFAULT_RETENTION_DAYS,
+    defer_message,
     dequeue_message,
     disable_autoclean,
     due_messages,
@@ -3103,7 +3104,13 @@ async def autoclean_loop() -> None:
     ):
         guild = bot.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild is not None else None
-        if channel is None or is_autoclean_protected_channel(channel):
+        if channel is None:
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
+            continue
+        if is_autoclean_protected_channel(channel):
+            # Channel was changed into a betting/recap channel after queuing.
+            # Cancel the deletion instead of retaining a risky queued job.
+            dequeue_message(conn, guild_id, channel_id, message_id)
             continue
 
         member = guild.me or (
@@ -3113,6 +3120,7 @@ async def autoclean_loop() -> None:
         if not perms or not (
             perms.view_channel and perms.read_message_history and perms.manage_messages
         ):
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
             continue
 
         try:
@@ -3122,9 +3130,11 @@ async def autoclean_loop() -> None:
             # Message was already removed manually; no reason to retry.
             pass
         except discord.Forbidden:
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
             continue
         except discord.HTTPException as exc:
             print(f"Autoclean delete retry later: {type(exc).__name__}")
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
             continue
         dequeue_message(conn, guild_id, channel_id, message_id)
 

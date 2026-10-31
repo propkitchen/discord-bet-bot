@@ -40,6 +40,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import discord
+from bettracker_sports import infer_sports_from_text
 import matplotlib.pyplot as plt
 from bettracker_visuals import generate_recap_card
 from discord.ext import commands, tasks
@@ -550,6 +551,14 @@ LEAGUE_KEYWORDS = [
     ("La Liga", ["LA LIGA"]),
     ("Serie A", ["SERIE A"]),
     ("Bundesliga", ["BUNDESLIGA"]),
+    ("Ligue 1", ["LIGUE 1"]),
+    ("Liga MX", ["LIGA MX"]),
+    ("Europa League", ["EUROPA LEAGUE"]),
+    ("Conference League", ["CONFERENCE LEAGUE"]),
+    ("Copa América", ["COPA AMERICA"]),
+    ("Copa Libertadores", ["COPA LIBERTADORES"]),
+    ("FA Cup", ["FA CUP"]),
+    ("Carabao Cup", ["CARABAO CUP", "EFL CUP"]),
     ("ATP", ["ATP"]),
     ("WTA", ["WTA"]),
 ]
@@ -637,34 +646,12 @@ def _contains_alias(text: str, alias: str) -> bool:
 
 
 def infer_sports(text: str) -> List[str]:
-    found: List[str] = []
-    upper = f" {text.upper()} "
-    for code, keys in SPORT_KEYWORDS:
-        if any(_contains_alias(upper, key) for key in keys):
-            found.append(code)
+    """Use specific tournaments/teams/players before generic emoji fallbacks.
 
-    emoji_values: List[str] = []
-    for emoji, code in SPORT_EMOJIS.items():
-        if emoji in text:
-            emoji_values.append(code)
-
-    # Generic basketball/football emoji cannot distinguish leagues. Use a written league
-    # when present; otherwise keep a broad sport label that is still better than UNKNOWN.
-    for code in emoji_values:
-        if code == "BASKETBALL":
-            if not any(x in found for x in ("WNBA", "NBA", "NCAAB")):
-                found.append("BASKETBALL")
-        elif code == "FOOTBALL":
-            if not any(x in found for x in ("NFL", "NCAAF")):
-                found.append("FOOTBALL")
-        elif code not in found:
-            found.append(code)
-
-    unique: List[str] = []
-    for code in found:
-        if code not in unique:
-            unique.append(code)
-    return unique
+    This is intentionally conservative: no sport is invented just because
+    a capper posts an ambiguous team name or a lone 🏀/🏈 emoji.
+    """
+    return infer_sports_from_text(text)
 
 
 def infer_sport(text: str) -> str:
@@ -1025,6 +1012,10 @@ def parse_analytics_fields(text: str, odds_text: str) -> Dict[str, object]:
     explicitly_mixed = re.search(r"(?<![A-Z0-9])MIXED(?![A-Z0-9])", text.upper()) is not None
     if explicitly_mixed or (len(sports) > 1 and wager_category in {WAGER_DFS, WAGER_PARLAY}):
         sport = "MIXED"
+    elif len(sports) > 1:
+        # A single straight bet cannot be both NFL and NBA. Ask the capper
+        # instead of picking whichever clue happens to be listed first.
+        sport = "UNKNOWN"
     else:
         sport = sports[0] if sports else "UNKNOWN"
 
@@ -2425,8 +2416,11 @@ def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str
     elif not odds_text:
         warnings.append("odds are missing, so a win would calculate as even money")
 
-    if sport in {"", "UNKNOWN"}:
-        warnings.append("sport is missing or unrecognized")
+    if sport in {"", "UNKNOWN", "FOOTBALL", "BASKETBALL", "SOFTBALL"}:
+        warnings.append(
+            "couldn't identify the specific sport/league; add `NFL`, `CFB`, "
+            "`NBA`, `WNBA`, `CBB`, etc. (a lone 🏈/🏀 can be ambiguous)"
+        )
     if description == "Bet details unavailable":
         warnings.append("wager details are too vague")
     return warnings

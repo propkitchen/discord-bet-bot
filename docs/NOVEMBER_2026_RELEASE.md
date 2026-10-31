@@ -8,6 +8,10 @@
 ## Implemented on November development branch (not yet live)
 
 - [x] Changed normal recap bet lines to `✅ | 1u | Brock Purdy o18.5 Rush Yards | -116 | +0.86u | jump` style. Removes decorative/custom emojis from the summary without editing source Discord posts.
+- [x] Overhauled recap reports to organize results **sport first**, then **Straight Bets / DFS Slips / Sportsbook Parlays** within each sport. Each section has independently calculated record, net units, risk and ROI; the top totals always cover all matching bets.
+- [x] DFS recap lines now use **✅ 10/4 | 0.3u | PrizePicks | 2.1x | +0.33u | jump** and omit bet description emojis/leg listings, while retaining links and net profit.
+- [x] Multi-sport `MIXED` wagers are placed in a dedicated group once. Explicit `MIXED` is a valid sport classification for DFS and parlays, not a missing-sport warning. Never split one slip's units across multiple sport totals.
+- [x] Recap pages via `bt!recap PropKitchen October 2026 page 2` or `bt!PropKitchen October 2026 recap page 2`. Display 75 entries per page and report the full period totals on every page.
 - [x] Changed detailed lists to show the newest 75 bets, rather than only the oldest 75; note when a listing is truncated. Period totals are computed independently over all matching rows.
 - [x] Added `bt!pending` (own bets), `bt!pending all`, `bt!pending gr8`, and paginated `bt!pending all 2`, with clickable original bet links.
 - [x] Recognize dates such as `10/18/2026`, `2026-10-18`, `Oct 18 2026`; support `last 14 days`, `October 2026`, `10/2026` and two-date ranges. Date parsing must never turn a valid date into a prop search.
@@ -31,7 +35,7 @@
 - [ ] Independently review the complete diff and check for accidental behavior changes.
 - [ ] Back up the actual persistent Render SQLite database **before** any migration.
 - [ ] Confirm the correct PropKitchen Discord server and test the legacy `guild_id=0` migration preview, including any old/deleted channels that cannot be verified.
-- [ ] Perform a staged/manual live test of tracking, odds, all grade reactions, ungrading, regrading, daily/monthly queries, revised dates, unknown commands and warning behavior; do not run a second live bot with production token.
+- [ ] Perform a staged/manual live test of tracking, odds, all grade reactions, ungrading, regrading, daily/monthly queries, **sport-grouped recaps and MIXED DFS**, revised dates, unknown commands and warning behavior; do not run a second live bot with production token.
 - [ ] Compare reported historical monthly capper units, win/loss totals and NBA/DFS records with existing authoritative tracker snapshots; no guessed data corrections.
 - [ ] Verify `bt!pending` jump URLs and modified permission behavior with at least one active capper account.
 - [ ] Verify exactly the intended two VIP role mentions with `bt!monthlyroles` after deployment.
@@ -40,7 +44,7 @@
 ## Still open / do not imply complete
 
 - [ ] Legacy records showing `Bet details unavailable`, `Odds: N/A` or no reconstructable message link: determine which can be safely retrieved from Discord using scoped `bt!backfill_content`. Don't invent missing odds or change historic net units without an audit.
-- [ ] Capper report display pagination beyond latest 75. The XLSX export provides the full selected ledger; Discord details remain capped and labeled as such.
+- [ ] Validate the new **75 bets per page** sport-first recap with long real-month results and Discord message-length splitting. Full matching bet history is accessible across pages and XLSX export; do not describe one page as all entries.
 - [ ] Complete performance/accuracy audit and deeper end-to-end reaction-grade tests under a nonproduction bot token.
 - [ ] Add additional verified NBA/NFL/MLB/WNBA season calendars (only NBA 2026 opening date verified for this release).
 - [ ] Check `sgtprops` roster mapping seen in historical recap versus the current hardcoded active capper registry; don't assign an unverified Discord user ID.

@@ -99,13 +99,13 @@ class ReportingTests(unittest.TestCase):
             "CREATE TABLE bets (graded_utc TEXT, capper TEXT, result TEXT, "
             "risk_units REAL, net_units REAL, content TEXT, market TEXT, "
             "odds_text TEXT, sport TEXT, jump_url TEXT, wager_category TEXT, "
-            "platform TEXT, sportsbook TEXT, guild_id INTEGER)"
+            "platform TEXT, sportsbook TEXT, guild_id INTEGER, message_id INTEGER, channel_id INTEGER)"
         )
         cur.executemany(
-            "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (f"2026-10-{i // 24 + 1:02d}T{i % 24:02d}:00:00", "test", "win",
-                 1.0, 1.0, str(i), "PTS", "-100", "NBA", "", "STRAIGHT", "", "", 303)
+                 1.0, 1.0, str(i), "PTS", "-100", "NBA", "", "STRAIGHT", "", "", 303, 1000 + i, 123)
                 for i in range(100)
             ],
         )
@@ -118,6 +118,7 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual("25", result[0][5])
         self.assertEqual("99", result[-1][5])
         self.assertFalse(any(row[5] == "0" for row in result))
+        self.assertEqual(result[0][9], "https://discord.com/channels/303/123/1025")
         conn.close()
 
 

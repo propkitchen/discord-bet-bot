@@ -1466,6 +1466,7 @@ def fetch_recent_bets(
     where_sql: str,
     params: Tuple[object, ...],
     limit: int = 75,
+    offset: int = 0,
 ) -> List[Tuple[str, str, str, float, float, str, str, str, str, str, str, str]]:
     rows = cur.execute(
         f"""
@@ -1479,13 +1480,14 @@ def fetch_recent_bets(
                 ELSE COALESCE(jump_url, '')
             END AS jump_url,
             {WAGER_CATEGORY_SQL} AS normalized_category,
-            COALESCE(platform, sportsbook, '')
+            COALESCE(platform, sportsbook, ''),
+            COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) AS display_date
         FROM bets
         WHERE {where_sql}
         ORDER BY graded_utc DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (*params, int(limit)),
+        (*params, int(limit), int(offset)),
     ).fetchall()
     rows.reverse()  # Keep chronological display order for the newest matching bets.
     return [
@@ -1502,8 +1504,9 @@ def fetch_recent_bets(
             str(jump or ""),
             str(category or WAGER_STRAIGHT),
             str(platform or ""),
+            str(display_date or ""),
         )
-        for graded, capper, result, risk, net, content, market, odds, sport, jump, category, platform in rows
+        for graded, capper, result, risk, net, content, market, odds, sport, jump, category, platform, display_date in rows
     ]
 
 
@@ -1607,25 +1610,61 @@ def compact_bet_description(content: str, market: str, max_len: int = 95) -> str
     return description or "Bet details unavailable"
 
 
+def format_recap_wager_date(bet_date: str, graded_utc: str) -> str:
+    """Short date label for DFS slips; prefer wager date over grading date."""
+    day = str(bet_date or "").strip()
+    if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", day):
+        day = local_date_from_utc_iso(graded_utc).isoformat()
+    try:
+        parsed = date.fromisoformat(day)
+        return f"{parsed.month}/{parsed.day}"
+    except ValueError:
+        return "Date N/A"
+
+
 def build_bet_result_line(
-    row: Tuple[str, str, str, float, float, str, str, str, str, str, str, str],
+    row: Tuple[str, ...],
     include_capper: bool = False,
 ) -> str:
-    _graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform = row
+    graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform, bet_date = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
-    description = compact_bet_description(content, market)
     parts = [icon]
     if include_capper:
         parts.append(f"**{capper}**")
-    parts += [format_compact_units(risk), description, format_odds_display(odds),
-              format_compact_units(net, signed=True)]
-    if jump_url and str(jump_url).startswith("https://discord.com/channels/"):
-        parts.append(f"[jump]({jump_url})")
-    elif jump_url:
-        parts.append(f"[jump]({jump_url})")
+
+    if category == WAGER_DFS:
+        # The original slip may contain many emojis/players; recaps only need
+        # the wager date, risk, app, actual multiplier, and realized profit.
+        parts.extend([
+            format_recap_wager_date(bet_date, graded),
+            format_compact_units(risk),
+            platform or "DFS Slip",
+            format_odds_display(odds),
+        ])
     else:
-        parts.append("jump unavailable")
+        parts.extend([
+            format_compact_units(risk),
+            compact_bet_description(content, market),
+            format_odds_display(odds),
+        ])
+
+    parts.append(format_compact_units(net, signed=True))
+    parts.append(f"[jump]({jump_url})" if str(jump_url or "").startswith("https://discord.com/channels/") else "jump unavailable")
     return " | ".join(parts)
+
+
+SPORT_RECAP_ORDER = (
+    "NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL", "NCAAB",
+    "SOCCER", "TENNIS", "GOLF", "UFC", "MMA", "MIXED", "UNKNOWN",
+)
+
+
+def recap_sport_order(label: str) -> Tuple[int, str]:
+    name = (label or "UNKNOWN").upper()
+    return (
+        SPORT_RECAP_ORDER.index(name) if name in SPORT_RECAP_ORDER else len(SPORT_RECAP_ORDER) - 2,
+        name,
+    )
 
 
 def build_filtered_summary_text(
@@ -1637,57 +1676,84 @@ def build_filtered_summary_text(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> str:
+    """Sport-first recap; totals always include ALL bets, not just page rows."""
     overall = stats_values(where_sql, params)
+    total = int(overall["total"])
+    page_size = 75
+    max_pages = max(1, (total + page_size - 1) // page_size)
+    if page < 1 or page > max_pages:
+        return f"That recap page does not exist. Use page 1 through {max_pages}."
 
     if capper_name:
-        lines = [f"📊 **Capper: {capper_name}**"]
-        if sport_name:
-            lines.append(f"Sport: **{sport_name}**")
-        if wager_category:
-            lines.append(f"Wager Type: **{wager_category_label(wager_category)}**")
-        if filter_label:
-            lines.append(f"Search: **{filter_label}**")
-        lines.append(f"Date: **{period_label}**")
-        append_stats(lines, overall)
+        lines = [f"📊 **{capper_name} — {period_label}**"]
     else:
         lines = [f"📊 **{title}**"]
-        append_stats(lines, overall)
+    if filter_label:
+        lines.append(f"Filter: **{filter_label}**")
+    if sport_name:
+        lines.append(f"Sport: **{sport_name}**")
+    if wager_category:
+        lines.append(f"Wager Type: **{wager_category_label(wager_category)}**")
 
-    bets = fetch_recent_bets(where_sql, params, limit=75)
-    if not bets:
-        return "\n".join(lines)
+    lines.extend([
+        "",
+        f"**OVERALL** — {overall['record']} ({float(overall['win_pct']):.1f}%) | {total} bets",
+        f"Risked: {float(overall['risk']):.2f}u | Net: **{float(overall['net']):+.2f}u** | ROI: **{float(overall['roi']):.1f}%**",
+    ])
+    if int(overall.get("voids", 0)):
+        lines.append(f"Voids: {int(overall['voids'])}")
+    if not total:
+        return "\n".join(lines + ["No bets found for this selection."])
 
-    if int(overall["total"]) > len(bets):
-        lines.append(f"Showing the latest {len(bets)} of {int(overall['total'])} wagers. Full history: `bt!export`.")
-    if not capper_name:
-        lines.append("\n**Bets:**")
-        lines.extend(build_bet_result_line(row, include_capper=True) for row in bets)
-        return "\n".join(lines)
+    bets = fetch_recent_bets(where_sql, params, limit=page_size, offset=(page - 1) * page_size)
+    lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
+    if max_pages > 1:
+        lines.append(f"To see other pages, repeat the command with `page 2`, `page 3`, etc. Complete export: `bt!export`.")
 
-    lines.append("\n**Bets:**")
-    categories = [wager_category] if wager_category else [WAGER_STRAIGHT, WAGER_PARLAY, WAGER_DFS]
-    for category in categories:
-        if not category:
-            continue
-        category_rows = [row for row in bets if row[10] == category]
-        category_where = f"({where_sql}) AND ({WAGER_CATEGORY_SQL}) = ?"
-        category_params = (*params, category)
-        category_stats = stats_values(category_where, category_params)
-        if int(category_stats["total"]) == 0:
-            continue
-
-        lines.append(f"\n**{wager_category_label(category)}**")
-        lines.append(
-            f"Record: **{category_stats['record']}** ({float(category_stats['win_pct']):.1f}%)"
-            f"{format_void_suffix(int(category_stats.get('voids', 0) or 0))} | "
-            f"Risked: **{float(category_stats['risk']):.2f}u**"
-        )
-        lines.append(
-            f"Net Units: **{float(category_stats['net']):+.2f}u** | "
-            f"ROI: **{float(category_stats['roi']):.1f}%** | Bets: **{int(category_stats['total'])}**"
-        )
-        lines.extend(build_bet_result_line(row) for row in category_rows)
+    sports = fetch_group_breakdown(
+        where_sql, params, "UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN'))",
+    )
+    for raw_sport, sport_stats in sorted(sports, key=lambda item: recap_sport_order(item[0])):
+        sport = str(raw_sport or "UNKNOWN").upper()
+        if sport == "MIXED":
+            heading = "MIXED — Multi-Sport Slips"
+        elif sport in {"UNKNOWN", "BASKETBALL", "FOOTBALL"}:
+            heading = f"{sport} — Check classification"
+        else:
+            heading = sport
+        lines.extend([
+            "",
+            f"🏟️ **{heading}**",
+            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%) | Bets: **{int(sport_stats['total'])}**",
+            f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
+        ])
+        # Full single-sport totals are counted here; a multi-sport slip belongs
+        # to MIXED ONLY, never credited to two sport sections.
+        category_where = f"({where_sql}) AND UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN')) = ?"
+        category_params = (*params, sport)
+        for category in (WAGER_STRAIGHT, WAGER_DFS, WAGER_PARLAY):
+            if wager_category is not None and category != wager_category:
+                continue
+            subset_where = f"({category_where}) AND ({WAGER_CATEGORY_SQL}) = ?"
+            subset_params = (*category_params, category)
+            stats = stats_values(subset_where, subset_params)
+            if not int(stats["total"]):
+                continue
+            category_rows = [
+                row for row in bets
+                if str(row[8]).upper() == sport and str(row[10]).upper() == category
+            ]
+            lines.append(
+                f"**{wager_category_label(category)}** — "
+                f"{stats['record']} | {float(stats['net']):+.2f}u | "
+                f"ROI {float(stats['roi']):.1f}% | {int(stats['total'])} bets"
+            )
+            lines.extend(build_bet_result_line(row, include_capper=not bool(capper_name))
+                         for row in category_rows)
+            if not category_rows:
+                lines.append("_Bets in this category appear on other pages._")
 
     return "\n".join(lines)
 
@@ -1702,6 +1768,7 @@ async def post_filtered_summary(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> None:
     text = build_filtered_summary_text(
         title,
@@ -1712,6 +1779,7 @@ async def post_filtered_summary(
         sport_name=sport_name,
         wager_category=wager_category,
         filter_label=filter_label,
+        page=page,
     )
     for chunk in split_discord_text(text):
         await ctx.send(chunk)
@@ -2144,6 +2212,7 @@ async def post_query_summary(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> None:
     label, start_local, end_local, error = parse_time_filter(time_text, sport=sport_name)
     if error:
@@ -2166,6 +2235,7 @@ async def post_query_summary(
         sport_name=sport_name,
         wager_category=wager_category,
         filter_label=filter_label,
+        page=page,
     )
 
 
@@ -4758,8 +4828,19 @@ async def league_cmd(ctx: commands.Context, *, query: str) -> None:
 @bot.command(name="capper", aliases=["bets"])
 async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
     tokens = split_args(query)
+    page = 1
+    if len(tokens) >= 2 and normalize_key(tokens[-2]) == "page":
+        try:
+            page = int(tokens[-1])
+        except ValueError:
+            await ctx.send("Use a page number like `page 2`.")
+            return
+        tokens = tokens[:-2]
+    if not 1 <= page <= 10000:
+        await ctx.send("Choose a page between 1 and 10000.")
+        return
     wants_report = any(normalize_key(token) == "report" for token in tokens)
-    tokens = [token for token in tokens if normalize_key(token) != "report"]
+    tokens = [token for token in tokens if normalize_key(token) not in {"report", "recap", "summary"}]
 
     capper, remaining = resolve_capper_from_tokens(tokens)
     if not capper:
@@ -4834,7 +4915,21 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
         sport_name=sport,
         wager_category=category,
         filter_label=filter_label,
+        page=page,
     )
+
+@bot.command(name="recap", aliases=["recaps"])
+async def recap_cmd(ctx: commands.Context, *, query: str = "") -> None:
+    tokens = split_args(query)
+    capper, _remaining = resolve_capper_from_tokens(tokens)
+    if capper is None:
+        own_capper = capper_by_user_id(ctx.author.id)
+        if own_capper is None:
+            await ctx.send("Use `bt!recap PropKitchen October 2026` or `bt!recap gr8 last 14 days`.")
+            return
+        query = f"{own_capper.name} {query}".strip()
+    await capper_cmd(ctx, query=query)
+
 
 @bot.command(name="report", aliases=["masterreport", "capperreport"])
 async def report_cmd(ctx: commands.Context, *, query: str) -> None:

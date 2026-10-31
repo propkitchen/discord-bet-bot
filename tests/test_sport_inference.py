@@ -17,7 +17,7 @@ class SportRecognitionTests(unittest.TestCase):
             "SNF Prop #2", "Sunday Night Football", "Monday Night Football",
             "Thursday Night Football", "Thuraday Night Football",
             "Super Bowl MVP", "NFC Championship ML", "AFC Championship",
-            "AFC/NFC Championship", "AFC East futures", "NFC",
+            "AFC/NFC Championship", "AFC East futures", "NFC", "AFC",
         ):
             with self.subTest(phrase=phrase):
                 self.assertEqual(["NFL"], infer_sports_from_text(phrase))
@@ -47,6 +47,11 @@ class SportRecognitionTests(unittest.TestCase):
             "Erling Haaland to score 1u -110": "SOCCER",
             "Haaland Anytime Goal": "SOCCER",
             "Premier League Arsenal vs Chelsea": "SOCCER",
+            "AFC Wimbledon ML": "SOCCER",
+            "AFC Asian Cup": "SOCCER",
+            "⚽ World Cup": "SOCCER",
+            "Toronto Tempo ML": "WNBA",
+            "Portland Fire ML": "WNBA",
             "UEFA Champions League": "SOCCER",
             "PGA golfer prop": "GOLF",
         }
@@ -85,7 +90,7 @@ class SportRecognitionTests(unittest.TestCase):
         for phrase in (
             "🏈", "🏀", "Iowa ML (-110)", "Cardinals -115",
             "Jets o2.5", "Kings spread", "Spurs ML",
-            "Eastern Conference ML", "Western Conference", "AFC",
+            "Eastern Conference ML", "Western Conference", "FIBA World Cup",
             "1u ⛱️ My best bet",
         ):
             with self.subTest(phrase=phrase):

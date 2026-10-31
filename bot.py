@@ -4056,10 +4056,22 @@ def default_league_for_manual_sport(new_sport: str, old_league: str, old_sport: 
 
 
 def referenced_message_id(ctx: commands.Context) -> Optional[int]:
+    """Resolve a replied-to tracked message only within this Discord server."""
     reference = ctx.message.reference
-    if not reference or not reference.message_id:
+    if ctx.guild is None or not reference or not reference.message_id:
         return None
-    return int(reference.message_id)
+    message_id = int(reference.message_id)
+    guild_id = int(ctx.guild.id)
+    row = cur.execute(
+        """
+        SELECT 1 FROM pending WHERE message_id = ? AND guild_id = ?
+        UNION ALL
+        SELECT 1 FROM bets WHERE message_id = ? AND guild_id = ?
+        LIMIT 1
+        """,
+        (message_id, guild_id, message_id, guild_id),
+    ).fetchone()
+    return message_id if row else None
 
 
 @bot.command(name="setdate", aliases=["set_bet_date", "fixdate"])

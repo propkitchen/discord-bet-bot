@@ -464,6 +464,14 @@ def ensure_schema() -> None:
             monthly_role_ids TEXT NOT NULL DEFAULT ''
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS autopost_history (
+            cadence TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            posted_utc TEXT NOT NULL,
+            PRIMARY KEY (cadence, period_key)
+        )
+    """)
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_graded_utc ON bets(graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_created_utc ON bets(created_utc);")
@@ -5004,6 +5012,24 @@ async def ping_monthly_vip_roles(channel: discord.abc.Messageable, month_label: 
     )
 
 
+def autopost_was_sent(cadence: str, period_key: str) -> bool:
+    return cur.execute(
+        "SELECT 1 FROM autopost_history WHERE cadence = ? AND period_key = ?",
+        (cadence, period_key),
+    ).fetchone() is not None
+
+
+def remember_autopost(cadence: str, period_key: str) -> None:
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO autopost_history (cadence, period_key, posted_utc)
+        VALUES (?, ?, ?)
+        """,
+        (cadence, period_key, utc_iso(datetime.now(timezone.utc))),
+    )
+    conn.commit()
+
+
 _last_post_key: Dict[str, Optional[str]] = {"daily": None, "weekly": None, "monthly": None, "yearly": None}
 
 
@@ -5026,10 +5052,11 @@ async def autopost_loop() -> None:
     # Daily: yesterday
     yesterday = nl.date() - timedelta(days=1)
     day_key = yesterday.isoformat()
-    if _last_post_key["daily"] != day_key:
+    if _last_post_key["daily"] != day_key and not autopost_was_sent("daily", day_key):
         _last_post_key["daily"] = day_key
         start_l, end_l = period_bounds_local("daily", yesterday)
         await post_period_summary(channel, banner(f"DAILY ({day_key})"), start_l, end_l)
+        remember_autopost("daily", day_key)
 
     # Weekly: previous week on Monday
     if nl.weekday() == WEEKLY_POST_WEEKDAY:
@@ -5038,31 +5065,34 @@ async def autopost_loop() -> None:
         week_start = start_l.date()
         week_end = (end_l - timedelta(days=1)).date()
         week_key = f"{week_start.isoformat()}_{week_end.isoformat()}"
-        if _last_post_key["weekly"] != week_key:
+        if _last_post_key["weekly"] != week_key and not autopost_was_sent("weekly", week_key):
             _last_post_key["weekly"] = week_key
             await post_period_summary(channel, banner(f"WEEKLY ({week_start} → {week_end})"), start_l, end_l)
+            remember_autopost("weekly", week_key)
 
     # Monthly: previous month on the 3rd
     if nl.day == MONTHLY_POST_DAY:
         prev_month_ref = nl.date().replace(day=1) - timedelta(days=1)
         start_l, end_l = period_bounds_local("monthly", prev_month_ref)
         month_label = f"{start_l.year}-{start_l.month:02d}"
-        if _last_post_key["monthly"] != month_label:
+        if _last_post_key["monthly"] != month_label and not autopost_was_sent("monthly", month_label):
             _last_post_key["monthly"] = month_label
             await post_period_summary(channel, banner(f"MONTHLY ({month_label})"), start_l, end_l)
             try:
                 await ping_monthly_vip_roles(channel, month_label)
             except discord.DiscordException as exc:
                 print(f"Monthly VIP role ping failed: {type(exc).__name__}")
+            remember_autopost("monthly", month_label)
 
     # Yearly: previous year on Jan 1
     if nl.month == 1 and nl.day == 1:
         prev_year_ref = nl.date() - timedelta(days=1)
         start_l, end_l = period_bounds_local("yearly", prev_year_ref)
         year_label = f"{start_l.year}"
-        if _last_post_key["yearly"] != year_label:
+        if _last_post_key["yearly"] != year_label and not autopost_was_sent("yearly", year_label):
             _last_post_key["yearly"] = year_label
             await post_period_summary(channel, banner(f"YEARLY ({year_label})"), start_l, end_l)
+            remember_autopost("yearly", year_label)
 
 
 if not TOKEN:

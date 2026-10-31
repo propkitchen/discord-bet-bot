@@ -93,3 +93,91 @@ def generate_recap_card(
     plt.close(fig)
     out.seek(0)
     return out
+
+
+def generate_play_recap_card(
+    title: str,
+    summary: Dict[str, object],
+    plays: List[Tuple[str, str]],
+    filters: str,
+    total_plays: int,
+) -> io.BytesIO:
+    """Compact, mobile-readable 4:5 social recap listing actual winning/losing bets.
+
+    This is a presentation-only image. The structured, auditable full report
+    remains in Discord. Plays arrive pre-cleaned, with no odds/units/jump URLs.
+    """
+    from textwrap import shorten
+
+    bg, panel, subdued, white = "#0D1116", "#1C242D", "#AAB5BE", "#F6F8FA"
+    lime, green, red = "#BCF34D", "#55E197", "#FF7582"
+    fig = plt.figure(figsize=(8, 10), dpi=150, facecolor=bg)
+    ax = fig.add_axes((0, 0, 1, 1), frameon=False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    def box(x, y, w, h, fill=panel):
+        ax.add_patch(FancyBboxPatch(
+            (x, y), w, h, boxstyle="round,pad=0.004,rounding_size=0.013",
+            facecolor=fill, edgecolor="none",
+        ))
+
+    def put(x, y, value, size=12, color=white, bold=False, align="left"):
+        ax.text(x, y, str(value), color=color, fontsize=size,
+                fontweight="bold" if bold else "normal",
+                ha=align, va="center", family="DejaVu Sans")
+
+    put(.065, .951, "PROPKITCHEN  /  BETTRACKER", 13, lime, True)
+    put(.065, .910, "PERFORMANCE RECAP", 28, white, True)
+    put(.065, .869, shorten(str(title), width=49, placeholder="..."), 14, white, True)
+    filter_line = shorten(str(filters), width=79, placeholder="...")
+    put(.065, .834, "FILTERS  " + filter_line, 11, subdued)
+
+    wins = int(summary.get("wins", 0))
+    losses = int(summary.get("losses", 0))
+    pushes = int(summary.get("pushes", 0))
+    record = f"{wins}-{losses}" + (f"-{pushes}" if pushes else "")
+    net = float(summary.get("net", 0))
+    roi = float(summary.get("roi", 0))
+    metrics = [
+        ("RECORD", record, white),
+        ("NET UNITS", f"{net:+.2f}u", green if net >= 0 else red),
+        ("ROI", f"{roi:+.1f}%", green if roi >= 0 else red),
+    ]
+    for idx, (name, value, tint) in enumerate(metrics):
+        x = .065 + idx * .295
+        box(x, .693, .274, .108)
+        put(x + .018, .768, name, 10, subdued, True)
+        put(x + .018, .725, value, 21 if len(value) < 11 else 16, tint, True)
+
+    put(.065, .648, "PLAYS", 17, white, True)
+    put(.927, .648, f"{int(summary.get('total', 0))} GRADED", 10, subdued, True, "right")
+
+    displayed = plays[:16]
+    # Give shorter multi-sport recaps breathing room without leaving a blank page.
+    row_gap = min(.075, .474 / max(len(displayed) - 1, 1))
+    font_size = 12 if len(displayed) <= 12 else 11
+    for idx, (result, wager) in enumerate(displayed):
+        y = .604 - idx * row_gap
+        box(.065, y - .013, .87, .034)
+        positive = result.lower() == "win"
+        marker = "✓" if positive else "✕" if result.lower() == "loss" else "—"
+        tint = green if positive else red if result.lower() == "loss" else subdued
+        put(.087, y + .004, marker, 14, tint, True)
+        name = shorten(str(wager).strip(), width=65 if font_size == 12 else 73, placeholder="...")
+        put(.123, y + .004, name, font_size, white)
+
+    if total_plays > len(displayed):
+        put(.068, .078, f"Latest {len(displayed)} of {total_plays} plays · full report in Discord", 10, subdued)
+    else:
+        put(.068, .078, "Complete play list for this selection", 10, subdued)
+    ax.plot([.065, .935], [.060, .060], color="#35404A", linewidth=1)
+    put(.068, .038, "Records · units · ROI · every result counted", 9, subdued)
+    put(.932, .038, "PK  /  RECAP", 10, lime, True, "right")
+
+    output = io.BytesIO()
+    fig.savefig(output, format="png", facecolor=bg, dpi=150)
+    plt.close(fig)
+    output.seek(0)
+    return output

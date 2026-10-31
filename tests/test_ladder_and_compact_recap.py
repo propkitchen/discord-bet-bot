@@ -45,7 +45,7 @@ class LadderParserTests(unittest.TestCase):
         ladder = parse_ladder_post(self.EXAMPLE)
         self.assertEqual(4, len(ladder.rungs))
         self.assertEqual([.75, .5, .25, .1], [r.risk for r in ladder.rungs])
-        self.assertEqual(["-110", "+120", "+240", "+500], [r.odds for r in ladder.rungs])
+        self.assertEqual(["-110", "+120", "+240", "+500"], [r.odds for r in ladder.rungs])
         self.assertIn("NFL", ladder.preface)
         self.assertNotIn("🪜", ladder.rungs[1].line)
 

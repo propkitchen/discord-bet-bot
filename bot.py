@@ -33,6 +33,8 @@ import os
 import re
 import shlex
 import sqlite3
+
+from bettracker_excel import export_xlsx
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -4655,6 +4657,21 @@ async def export_cmd(ctx: commands.Context, *, query: str = "alltime") -> None:
         await ctx.send("No graded bets matched that export.")
         return
     headers = [str(column[0]) for column in export_cursor.description]
+    raw_csv = str(getattr(ctx, "invoked_with", "") or "").lower() in {"exportcsv", "csv"}
+    if not raw_csv:
+        payload = io.BytesIO(export_xlsx(headers, rows, clean_period_label(label)))
+        payload.seek(0)
+        safe_parts = [normalize_key(part) or "all" for part in labels]
+        period_name = normalize_key(clean_period_label(label)) or "alltime"
+        filename = "bettracker_" + "_".join([*safe_parts, period_name]) + ".xlsx"
+        await ctx.send(
+            f"📊 **BetTracker Excel Report**\n"
+            f"Rows: **{len(rows)}** | Period: **{clean_period_label(label)}**\n"
+            "Includes Summary and Bets worksheets.",
+            file=discord.File(payload, filename=filename),
+        )
+        return
+
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(headers)

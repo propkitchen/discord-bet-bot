@@ -169,7 +169,7 @@ def generate_play_recap_card(
         put(.123, y + .004, name, font_size, white)
 
     if total_plays > len(displayed):
-        put(.068, .078, f"Showing {len(displayed)} of {total_plays} plays · full report in Discord", 10, subdued)
+        put(.068, .078, f"Latest {len(displayed)} of {total_plays} plays · full report in Discord", 10, subdued)
     else:
         put(.068, .078, "Complete play list for this selection", 10, subdued)
     ax.plot([.065, .935], [.060, .060], color="#35404A", linewidth=1)

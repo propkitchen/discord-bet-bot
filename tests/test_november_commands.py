@@ -92,18 +92,19 @@ class NovemberCommandTests(unittest.TestCase):
         cur = conn.cursor()
         cur.execute(
             "CREATE TABLE bets (message_id INTEGER, guild_id INTEGER, risk_units REAL, "
-            "result TEXT, odds_text TEXT, net_units REAL, odds_format TEXT, multiplier REAL)")
-        cur.executemany("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
-            (101, 1, .5, "win", "25x", 12.0, "multiplier", 25.0),
-            (102, 2, .5, "win", "25x", 12.0, "multiplier", 25.0),
+            "result TEXT, odds_text TEXT, net_units REAL, odds_format TEXT, multiplier REAL, capper_user_id INTEGER)")
+        cur.executemany("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            (101, 1, .5, "win", "25x", 12.0, "multiplier", 25.0, 42),
+            (102, 2, .5, "win", "25x", 12.0, "multiplier", 25.0, 999),
         ])
         events, messages = [], []
         async def send(msg): messages.append(msg)
         ctx = SimpleNamespace(guild=SimpleNamespace(id=1),
-                              author=SimpleNamespace(id=42), send=send)
+                              author=SimpleNamespace(id=42, guild_permissions=SimpleNamespace(manage_guild=False)), send=send)
         payout = isolate(
             "setpayout_cmd", cur=cur, conn=conn,
             referenced_message_id=lambda _ctx: 101,
+            ADMIN_USER_ID=9, re=re,
             parse_manual_odds_text=lambda x: x,
             parse_multiplier_value=lambda x: float(x[:-1]) if x.endswith("x") else None,
             compute_net_units=lambda units, odds, result: units * (float(odds[:-1]) - 1),

@@ -37,6 +37,12 @@ def is_ladder_post(text: str) -> bool:
     return "🪜" in text or bool(MARKER.search(text))
 
 
+def has_multiple_staked_lines(text: str) -> bool:
+    """Prevent silently saving just the first wager of an unmarked ladder."""
+    lines = re.split(r"\r?\n", text or "")
+    return sum(1 for line in lines if LEADING_UNITS.search(line)) >= 2
+
+
 def parse_ladder_post(text: str) -> LadderPost:
     if not is_ladder_post(text):
         raise ValueError("Not a marked ladder.")

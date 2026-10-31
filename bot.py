@@ -1436,8 +1436,7 @@ async def post_leaderboard(
         league_name=league_name,
         wager_category=wager_category,
     )
-    for embed in make_report_embeds(text, heading=f"VIP RESULTS  /  {period_label}"):
-        await channel.send(embed=embed)
+    await send_styled_report(channel, text, heading=f"VIP RESULTS  /  {period_label}")
 
     if include_chart:
         rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=False)
@@ -1576,6 +1575,32 @@ def make_report_embeds(text: str, heading: str = "BETTRACKER REPORT") -> List[di
         embed.set_footer(text="PROPKITCHEN  •  BETTRACKER  |  Complete performance records")
         reports.append(embed)
     return reports
+
+
+async def send_styled_report(
+    destination: discord.abc.Messageable,
+    text: str,
+    heading: str,
+) -> None:
+    """Prefer styled embeds, but never lose results due to Embed Links permissions.
+
+    Keep already-posted chunks when an individual embed fails; send the
+    remaining chunks as plain text to avoid posting duplicate results.
+    """
+    chunks = split_discord_text(text, limit=3450)
+    embeds = make_report_embeds(text, heading=heading)
+    for index, embed in enumerate(embeds):
+        try:
+            await destination.send(embed=embed)
+        except discord.HTTPException as exc:
+            print(
+                f"BetTracker embed unavailable; using plain text: "
+                f"{type(exc).__name__} (status={getattr(exc, 'status', 'unknown')})"
+            )
+            for remaining in chunks[index:]:
+                for plain_chunk in split_discord_text(remaining, limit=1800):
+                    await destination.send(plain_chunk)
+            return
 
 
 def stats_values(where_sql: str, params: Tuple[object, ...]) -> Dict[str, object]:
@@ -1794,8 +1819,7 @@ async def post_filtered_summary(
         filter_label=filter_label,
         page=page,
     )
-    for embed in make_report_embeds(text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS"):
-        await ctx.send(embed=embed)
+    await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS")
 
     # A standalone, 4:5 performance graphic is easier to screenshot or post on X.
     if capper_name and page == 1:
@@ -1943,8 +1967,7 @@ async def post_master_report(
         where_sql,
         final_params,
     )
-    for embed in make_report_embeds(text, heading=f"{capper_name}  /  PERFORMANCE REPORT"):
-        await ctx.send(embed=embed)
+    await send_styled_report(ctx, text, heading=f"{capper_name}  /  PERFORMANCE REPORT")
 
 
 # =====================
@@ -5107,9 +5130,77 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
         await ctx.send(chunk)
 
 
+@bot.command(name="reportcheck", aliases=["checkreports"])
+@commands.has_permissions(manage_guild=True)
+async def reportcheck_cmd(ctx: commands.Context) -> None:
+    """Read-only check for a failed capper results command."""
+    if ctx.guild is None:
+        await ctx.send("Run this inside the PropKitchen server.")
+        return
+
+    guild_id = int(ctx.guild.id)
+    counts = cur.execute(
+        "SELECT COUNT(*), COALESCE(SUM(net_units), 0) FROM bets WHERE guild_id = ?",
+        (guild_id,),
+    ).fetchone()
+    pending_count = int(cur.execute(
+        "SELECT COUNT(*) FROM pending WHERE guild_id = ?", (guild_id,)
+    ).fetchone()[0])
+
+    me = ctx.guild.me
+    permissions = ctx.channel.permissions_for(me) if me is not None else None
+    embed_permission = (
+        "Yes" if permissions and permissions.embed_links
+        else "No" if permissions is not None else "Unknown"
+    )
+
+    yesterday = now_local().date() - timedelta(days=1)
+    start_local, end_local = local_day_bounds(yesterday)
+    date_sql, date_params = date_window_where(start_local, end_local)
+    where = f"guild_id = ? AND LOWER(capper) = ? AND ({date_sql})"
+    params = (guild_id, "propkitchen", *date_params)
+
+    try:
+        report = build_filtered_summary_text(
+            "PropKitchen", where, params,
+            capper_name="PropKitchen", period_label="Yesterday",
+        )
+        query_result = f"PASS ({len(report):,} characters)"
+    except Exception as exc:
+        print(f"BetTracker reportcheck query error: {type(exc).__name__}: {exc}")
+        query_result = f"FAILED ({type(exc).__name__})"
+
+    await ctx.send(
+        "🔎 **BetTracker Report Diagnostics**\n"
+        f"Server graded bets: **{int(counts[0]):,}**\n"
+        f"Server pending bets: **{pending_count:,}**\n"
+        f"Net units in database: **{float(counts[1]):+.2f}u**\n"
+        f"Embed Links permission: **{embed_permission}**\n"
+        f"PropKitchen yesterday recap query: **{query_result}**\n"
+        "Read-only check — no betting data changed."
+    )
+
+
 # =====================
 # COMMAND ERRORS
 # =====================
+
+async def notify_command_failure(ctx: commands.Context, error: Exception) -> None:
+    """No tracking/reporting command should fail without telling the capper."""
+    underlying = getattr(error, "original", error)
+    print(
+        f"BetTracker command failed: {type(underlying).__name__}: {underlying} "
+        f"(command={getattr(ctx.message, 'content', '')[:100]!r})"
+    )
+    try:
+        await ctx.send(
+            "⚠️ **BetTracker couldn't finish that command.** "
+            "No betting records were changed by this report. "
+            "Please tell an admin which command failed so they can check the bot logs."
+        )
+    except discord.HTTPException:
+        print("BetTracker could not send the command error notice.")
+
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
@@ -5122,7 +5213,10 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
         if tokens:
             recognized, _rest = resolve_capper_from_tokens(tokens)
             if recognized:
-                await ctx.invoke(capper_cmd, query=raw)
+                try:
+                    await ctx.invoke(capper_cmd, query=raw)
+                except Exception as exc:
+                    await notify_command_failure(ctx, exc)
                 return
             sport, category, remaining = resolve_optional_filters(tokens)
             time_text = " ".join(remaining)
@@ -5146,7 +5240,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Missing argument. Try `bt!month 2026-07`, `bt!leaderboard MLB july`, or `bt!capper PropKitchen today`.")
         return
-    raise error
+    await notify_command_failure(ctx, error)
 
 
 # =====================

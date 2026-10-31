@@ -1806,6 +1806,34 @@ async def post_filtered_summary(
     for embed in make_report_embeds(text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS"):
         await ctx.send(embed=embed)
 
+    # A standalone, 4:5 performance graphic is easier to screenshot or post on X.
+    if capper_name and page == 1:
+        try:
+            breakdown = fetch_group_breakdown(
+                where_sql, params, "UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN'))"
+            )
+            if breakdown:
+                sport_rows = [
+                    (
+                        sport, float(stats["net"]), int(stats["wins"]),
+                        int(stats["losses"]), int(stats["pushes"]),
+                    )
+                    for sport, stats in sorted(
+                        breakdown, key=lambda pair: float(pair[1]["net"]), reverse=True
+                    )
+                ]
+                image = generate_recap_card(
+                    capper_name,
+                    sport_rows,
+                    summary=stats_values(where_sql, params),
+                    period_label=period_label,
+                    section_title="SPORT BREAKDOWN",
+                )
+                await ctx.send(file=discord.File(image, filename="propkitchen_capper_recap.png"))
+        except Exception as exc:
+            # Bot reports must succeed even when an optional image renderer fails.
+            print(f"Capper recap image unavailable: {type(exc).__name__}: {exc}")
+
 
 def fetch_group_breakdown(
     where_sql: str,

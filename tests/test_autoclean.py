@@ -15,6 +15,7 @@ from bettracker_autoclean import (
     due_messages,
     queued_count,
     dequeue_message,
+    defer_message,
 )
 
 
@@ -70,6 +71,17 @@ class AutocleanDatabaseTests(unittest.TestCase):
         self.assertEqual([(2, 400, 102)], [
             x for x in due_messages(self.db, 1000 + 7 * 86400) if x[0] == 2
         ])
+
+    def test_missing_permissions_retries_later_without_blocking_other_guilds(self):
+        set_retention_days(self.db, 1, 100, 3)
+        set_retention_days(self.db, 2, 200, 3)
+        enqueue_message(self.db, 1, 100, 101, 1000)
+        enqueue_message(self.db, 2, 200, 202, 1000)
+        due = 1000 + 3 * 86400
+        defer_message(self.db, 1, 100, 101, due + 3600)
+        self.assertEqual([(2, 200, 202)], due_messages(self.db, due))
+        self.assertEqual({(1, 100, 101), (2, 200, 202)},
+                         set(due_messages(self.db, due + 3600)))
 
     def test_duration_is_bounded(self):
         for days in (0, 31, 100):

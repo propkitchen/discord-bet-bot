@@ -128,7 +128,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "SAN FRANCISCO GIANTS", "SEATTLE MARINERS",
         "ST LOUIS CARDINALS", "ST. LOUIS CARDINALS",
         "TAMPA BAY RAYS", "TEXAS RANGERS", "TORONTO BLUE JAYS",
-        "WASHINGTON NATIONALS", "ATHLETICS", "AS", "DIAMONDBACKS",
+        "WASHINGTON NATIONALS", "ATHLETICS", "DIAMONDBACKS",
         "D-BACKS", "BRAVES", "ORIOLES", "RED SOX", "CUBS", "WHITE SOX",
         "REDS", "GUARDIANS", "ROCKIES", "TIGERS", "ASTROS",
         "ROYALS", "ANGELS", "DODGERS", "MARLINS", "BREWERS",
@@ -302,10 +302,13 @@ def _entity_matches(text: str, emojis: Set[str]) -> List[str]:
         if code not in unique:
             unique.append(code)
 
-    if any(_has(text, school) for school in COLLEGE_NAMES):
-        if "FOOTBALL" in emojis and "NCAAF" not in unique:
+    # College school names are shared between football and basketball.
+    # Only infer a college league when the emoji resolves it and no
+    # specific pro/team/player clue already matched ("Texas Rangers" ≠ Texas).
+    if not unique and any(_has(text, school) for school in COLLEGE_NAMES):
+        if "FOOTBALL" in emojis:
             unique.append("NCAAF")
-        elif "BASKETBALL" in emojis and "NCAAB" not in unique:
+        elif "BASKETBALL" in emojis:
             unique.append("NCAAB")
     return unique
 

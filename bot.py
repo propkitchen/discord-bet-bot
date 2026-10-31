@@ -2283,8 +2283,6 @@ def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str
         warnings.append("sport is missing or unrecognized")
     if description == "Bet details unavailable":
         warnings.append("wager details are too vague")
-    if not parse_bet_date(content, created_utc):
-        warnings.append("written bet date is missing; the grading date will be used")
     return warnings
 
 
@@ -2394,7 +2392,9 @@ def insert_pending(
 
     odds_text = parse_odds_text(content)
     fields = parse_analytics_fields(content, odds_text)
-    bet_date = parse_bet_date(content, created_utc)
+    # When no future/event date is supplied, assume the posting day in ET.
+    # Cappers posting advance picks should explicitly include the game date.
+    bet_date = parse_bet_date(content, created_utc) or local_date_from_utc_iso(created_utc).isoformat()
     duplicate_key = build_duplicate_key(content, created_utc, capper.name, risk, odds_text, fields)
     duplicate_message_id = find_duplicate_message_id(
         message_id,
@@ -2465,7 +2465,7 @@ def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bo
     odds_text = parse_odds_text(content)
     fields = parse_analytics_fields(content, odds_text)
     created_utc = utc_iso(message.created_at)
-    bet_date = parse_bet_date(content, created_utc)
+    bet_date = parse_bet_date(content, created_utc) or local_date_from_utc_iso(created_utc).isoformat()
     duplicate_key = build_duplicate_key(content, created_utc, capper.name, risk, odds_text, fields)
 
     cur.execute(
@@ -3189,7 +3189,7 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "`bt!trackcheck` | `bt!pending` | `bt!pending all` | `bt!pending gr8`\n\n"
         "**Admin**\n"
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"
-        "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`\n"
+        "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`, `bt!setpayout 2x`\n"
         "`bt!force_sport NBA WNBA 2026-07-01 2026-07-31`\n"
         "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`"
     )
@@ -4130,6 +4130,53 @@ async def setodds_cmd(ctx: commands.Context, *, odds_arg: str) -> None:
         f"✅ Graded bet odds updated to **{odds_text}**.\n"
         f"Net units corrected from **{float(old_net):+.2f}u** to **{new_net:+.2f}u**.\n"
         f"Wager type: **{wager_category_label(str(fields['wager_category']))}**."
+    )
+
+
+@bot.command(name="setpayout", aliases=["flexpayout", "paidmultiplier"])
+@commands.has_permissions(manage_guild=True)
+async def setpayout_cmd(ctx: commands.Context, multiplier_text: str) -> None:
+    """Correct a settled slip's actual total payout multiplier (e.g. 25x paid 2x)."""
+    if ctx.guild is None:
+        await ctx.send("Use this command inside the Discord server.")
+        return
+    message_id = referenced_message_id(ctx)
+    if message_id is None:
+        await ctx.send("Reply to the original *graded* slip with `bt!setpayout 2x`.")
+        return
+    multiplier_text = parse_manual_odds_text(multiplier_text)
+    mult = parse_multiplier_value(multiplier_text)
+    if mult is None or mult <= 1:
+        await ctx.send("Enter the actual total payout multiplier, e.g. `bt!setpayout 2x`.")
+        return
+    row = cur.execute(
+        """
+        SELECT risk_units, result, odds_text, net_units
+        FROM bets WHERE message_id = ? AND guild_id = ?
+        """, (int(message_id), int(ctx.guild.id)),
+    ).fetchone()
+    if not row:
+        await ctx.send("Graded bet not found in this server. Grade the slip first.")
+        return
+    risk, result, old_odds, old_net = row
+    if str(result) != "win":
+        await ctx.send("This command is for a graded slip that paid out. Use grading reactions for losses/voids.")
+        return
+    new_net = compute_net_units(float(risk), multiplier_text, "win")
+    cur.execute(
+        """
+        UPDATE bets SET odds_text = ?, odds_format = 'multiplier', multiplier = ?, net_units = ?
+        WHERE message_id = ? AND guild_id = ?
+        """, (multiplier_text, float(mult), float(new_net), int(message_id), int(ctx.guild.id)),
+    )
+    log_correction(message_id, "bets", "settled_payout_multiplier",
+                   str(old_odds or ""), multiplier_text, ctx.author.id,
+                   "Actual flex/void-adjusted payout; original post retained")
+    conn.commit()
+    await ctx.send(
+        f"✅ **Actual payout recorded: {multiplier_text}**\n"
+        f"Risk: **{float(risk):g}u** | Net: **{new_net:+.2f}u** "
+        f"(previously {float(old_net):+.2f}u). Original message unchanged."
     )
 
 

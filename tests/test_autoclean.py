@@ -87,7 +87,7 @@ class AutocleanBotGuardsTests(unittest.TestCase):
             x for x in self.tree.body
             if isinstance(x, ast.FunctionDef) and x.name == name
         )
-        module = ast.Module(body=[fn], type_ignores=[])
+        module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), fn], type_ignores=[])
         exec(compile(ast.fix_missing_locations(module), "<autoclean guard>", "exec"), scope)
         return scope[name]
 

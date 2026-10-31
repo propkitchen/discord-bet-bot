@@ -48,7 +48,7 @@ from bettracker_autoclean import (
     set_retention_days,
 )
 from bettracker_excel import export_xlsx
-from bettracker_ladders import is_ladder_post, parse_ladder_post
+from bettracker_ladders import has_multiple_staked_lines, is_ladder_post, parse_ladder_post
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -3302,7 +3302,7 @@ async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
         return True
 
     # A lone football/basketball emoji is not an unambiguous league.
-    context = ladder.preface
+    context = ladder.preface + "\n" + "\n".join(r.line for r in ladder.rungs)
     specific_sports = [
         item for item in infer_sports(context)
         if item not in {"FOOTBALL", "BASKETBALL", "SOFTBALL"}
@@ -3439,6 +3439,14 @@ async def on_message(message: discord.Message) -> None:
         await track_ladder_post(message, capper)
         await bot.process_commands(message)
         return
+    if has_multiple_staked_lines(content):
+        await send_temporary_notice(
+            message,
+            "⚠️ **Multiple wagers found in one message, none tracked.** "
+            "For a ladder, add LADDER or 🪜 and a league in the heading. "
+            "Otherwise post each bet separately to grade it independently.",
+        )
+        return
 
     if parse_risk_units(content) is None:
         if looks_like_wager_message(message, content):
@@ -3501,6 +3509,8 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     if is_ladder_post(content):
         await track_ladder_post(after, capper)
         return
+    if has_multiple_staked_lines(content):
+        return
     if pending_exists(after.id):
         refresh_pending_from_message(after, capper)
         return
@@ -3554,6 +3564,8 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
     content = message_to_text(message)
     if is_ladder_post(content):
         await track_ladder_post(message, capper)
+        return
+    if has_multiple_staked_lines(content):
         return
     if pending_exists(payload.message_id):
         refresh_pending_from_message(message, capper)

@@ -17,7 +17,8 @@ EXPLICIT_EVENTS: Dict[str, Sequence[str]] = {
     "NFL": (
         "NFL", "TNF", "MNF", "SNF", "THURSDAY NIGHT FOOTBALL",
         "MONDAY NIGHT FOOTBALL", "SUNDAY NIGHT FOOTBALL",
-        "SUPER BOWL", "SUPERBOWL", "NFC CHAMPIONSHIP",
+        "SUPER BOWL", "SUPERBOWL", "THURADAY NIGHT FOOTBALL",
+        "THURS NIGHT FOOTBALL", "NFC CHAMPIONSHIP",
         "AFC CHAMPIONSHIP", "NFC EAST", "NFC WEST", "NFC NORTH",
         "NFC SOUTH", "AFC EAST", "AFC WEST", "AFC NORTH",
         "AFC SOUTH", "NFC/AFC", "AFC/NFC", "NFC TITLE GAME",
@@ -86,6 +87,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "CHIEFS", "RAIDERS", "CHARGERS", "RAMS", "DOLPHINS", "VIKINGS",
         "PATRIOTS", "PATS", "SAINTS", "EAGLES", "STEELERS",
         "SEAHAWKS", "BUCCANEERS", "BUCS", "TITANS", "COMMANDERS",
+        "GIANTS", "JETS", "CARDINALS", "PANTHERS",
     ),
     "NBA": (
         "ATLANTA HAWKS", "BOSTON CELTICS", "BROOKLYN NETS",
@@ -104,7 +106,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "CLIPPERS", "LAKERS", "GRIZZLIES", "HEAT", "BUCKS",
         "TIMBERWOLVES", "PELICANS", "KNICKS", "THUNDER",
         "MAGIC", "SIXERS", "76ERS", "SUNS", "TRAIL BLAZERS",
-        "BLAZERS", "SPURS", "RAPTORS", "JAZZ", "WIZARDS",
+        "BLAZERS", "SPURS", "RAPTORS", "JAZZ", "WIZARDS", "KINGS",
     ),
     "WNBA": (
         "ATLANTA DREAM", "CHICAGO SKY", "CONNECTICUT SUN",
@@ -131,6 +133,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "REDS", "GUARDIANS", "ROCKIES", "TIGERS", "ASTROS",
         "ROYALS", "ANGELS", "DODGERS", "MARLINS", "BREWERS",
         "TWINS", "METS", "YANKEES", "PHILLIES", "PIRATES",
+        "CARDINALS", "GIANTS", "RANGERS",
         "PADRES", "MARINERS", "RAYS", "BLUE JAYS", "NATIONALS",
     ),
     "NHL": (
@@ -152,6 +155,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "DEVILS", "ISLANDERS", "SENATORS", "FLYERS", "PENGUINS",
         "SHARKS", "KRAKEN", "BLUES", "LIGHTNING", "MAPLE LEAFS",
         "MAMMOTH", "CANUCKS", "GOLDEN KNIGHTS", "CAPITALS",
+        "PANTHERS", "KINGS", "JETS", "RANGERS",
     ),
     "SOCCER": (
         "MANCHESTER CITY", "MAN CITY", "MAN UTD", "MANCHESTER UNITED",
@@ -164,7 +168,7 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "DORTMUND", "PARIS SAINT GERMAIN", "PSG", "JUVENTUS",
         "INTER MILAN", "AC MILAN", "NAPOLI", "ATLETICO MADRID",
         "AJAX", "BENFICA", "SPORTING CP", "CELTIC FC", "LA GALAXY",
-        "INTER MIAMI", "MIAMI FC",
+        "INTER MIAMI", "MIAMI FC", "SPURS",
     ),
 }
 

@@ -1726,15 +1726,48 @@ def append_stats(lines: List[str], stats: Dict[str, object]) -> None:
         ]
     )
 
+RECAP_MARKET_ABBREVIATIONS = (
+    (r"(?i)\bpoints\b", "Pts"),
+    (r"(?i)\brebounds\b", "Reb"),
+    (r"(?i)\bassists\b", "Ast"),
+    (r"(?i)\breceptions\b", "Rec"),
+    (r"(?i)\breceiving\s+yards\b", "Rec Yds"),
+    (r"(?i)\brushing\s+yards\b", "Rush Yds"),
+    (r"(?i)\bpassing\s+yards\b", "Pass Yds"),
+    (r"(?i)\bpassing\s+touchdowns\b", "Pass TDs"),
+    (r"(?i)\brushing\s+touchdowns\b", "Rush TDs"),
+    (r"(?i)\btotal\s+bases\b", "TB"),
+    (r"(?i)\bstrikeouts\b", "Ks"),
+    (r"(?i)\bshots\s+on\s+goal\b", "SOG"),
+)
+
+
 def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
-    """Remove presentation emojis and duplicate metadata from recap descriptions."""
-    description = display_bet_text(content, market, max_len=max_len + 80)
+    """Compact wager-only text. Remove odds, site labels and broken punctuation."""
+    description = display_bet_text(content, market, max_len=max_len + 100)
     description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
     description = re.sub(r":[A-Za-z0-9_]+:", "", description)
     description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)
+    description = re.sub(r"\(\s*(?:\|)?\s*$", "", description)
+    description = re.sub(r"\|\s*$", "", description)
+    description = re.sub(
+        r"(?i)\(\s*(?:Onyx|FanDuel|DraftKings|Hard Rock|BetMGM|"
+        r"Caesars|Bet365|Fanatics|ESPN BET)\s*\)?\s*$", "", description
+    )
+    description = re.sub(
+        r"(?i)(?:\s*\|\s*|\s+)(?:Onyx|FanDuel|DraftKings|Hard Rock|"
+        r"BetMGM|Caesars|Bet365|Fanatics|ESPN BET)\s*$", "", description
+    )
+    description = re.sub(
+        r"(?i)^(?:NBA|WNBA|NFL|NCAAF|CFB|CBB|NCAAB|MLB|NHL)\s+",
+        "", description,
+    )
+    description = re.sub(r"\s*\|\s*", " ", description)
     description = re.sub(r"(?i)\bOVER\s*(?=\d|\.)", "o", description)
     description = re.sub(r"(?i)\bUNDER\s*(?=\d|\.)", "u", description)
-    description = normalize_space(description).strip(" |:-")
+    for pattern, replacement in RECAP_MARKET_ABBREVIATIONS:
+        description = re.sub(pattern, replacement, description)
+    description = normalize_space(description).strip(" |:()-")
     if len(description) > max_len:
         description = description[:max_len - 3].rstrip() + "..."
     return description or "Bet details unavailable"
@@ -1759,31 +1792,22 @@ def build_bet_result_line(
     graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform, bet_date = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
     if category == WAGER_DFS:
-        # Keep the capper's DFS recap as clean as "✅ 10/4 | 0.3u | PrizePicks | 2.1x".
-        # Never echo decorative post emojis or a long list of individual legs.
-        date_text = format_recap_wager_date(bet_date, graded)
-        prefix = f"{icon} **{capper}**" if include_capper else f"{icon} {date_text}"
-        parts = [prefix]
-        if include_capper:
-            parts.append(date_text)
-        parts.extend([
-            format_compact_units(risk),
-            platform or "DFS Slip",
-            format_odds_display(odds),
-        ])
+        detail = [format_compact_units(risk), platform or "DFS Slip", format_odds_display(odds)]
     else:
-        parts = [icon]
-        if include_capper:
-            parts.append(f"**{capper}**")
-        parts.extend([
+        detail = [
             format_compact_units(risk),
             compact_bet_description(content, market),
             format_odds_display(odds),
-        ])
-
-    parts.append(format_compact_units(net, signed=True))
-    parts.append(f"[jump]({jump_url})" if str(jump_url or "").startswith("https://discord.com/channels/") else "jump unavailable")
-    return " | ".join(parts)
+        ]
+    if include_capper:
+        detail.insert(0, f"**{capper}**")
+    detail.extend([
+        format_compact_units(net, signed=True),
+        f"[jump]({jump_url})"
+        if str(jump_url or "").startswith("https://discord.com/channels/")
+        else "jump unavailable",
+    ])
+    return f"{icon} " + " | ".join(detail)
 
 
 SPORT_RECAP_ORDER = (
@@ -1846,7 +1870,7 @@ def build_filtered_summary_text(
 
     lines.extend([
         "",
-        f"**OVERALL** — {overall['record']} ({float(overall['win_pct']):.1f}%) | {total} bets",
+        f"**OVERALL** — **{overall['record']}** ({float(overall['win_pct']):.1f}%) | {total} bets",
         f"Risked: {float(overall['risk']):.2f}u | Net: **{float(overall['net']):+.2f}u** | ROI: **{float(overall['roi']):.1f}%**",
     ])
     if int(overall.get("voids", 0)):
@@ -1856,7 +1880,7 @@ def build_filtered_summary_text(
 
     bets = fetch_recent_bets(where_sql, params, limit=page_size, offset=(page - 1) * page_size)
     if max_pages == 1:
-        lines.append(f"\n**Wager details** ({total} bets)")
+        lines.append("\n**PLAYS**")
     else:
         lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
     if max_pages > 1:
@@ -1876,7 +1900,7 @@ def build_filtered_summary_text(
         lines.extend([
             "",
             f"{sport_recap_emoji(sport)} **{heading}**",
-            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%) | Bets: **{int(sport_stats['total'])}**",
+            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%)",
             f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
         ])
         # Full single-sport totals are counted here; a multi-sport slip belongs
@@ -1898,7 +1922,7 @@ def build_filtered_summary_text(
             lines.append(
                 f"**{wager_category_label(category)}** — "
                 f"{stats['record']} | {float(stats['net']):+.2f}u | "
-                f"ROI {float(stats['roi']):.1f}% | {int(stats['total'])} bets"
+                f"ROI {float(stats['roi']):.1f}%"
             )
             lines.extend(build_bet_result_line(row, include_capper=not bool(capper_name))
                          for row in category_rows)
@@ -1931,7 +1955,7 @@ async def post_filtered_summary(
         filter_label=filter_label,
         page=page,
     )
-    await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS")
+    await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  RECAP")
 
     # Only substantive multi-day or multi-sport summaries get an extra image.
     # Images list actual plays, with complete odds/net/jump details above.
@@ -2065,7 +2089,7 @@ async def post_master_report(
         where_sql,
         final_params,
     )
-    await send_styled_report(ctx, text, heading=f"{capper_name}  /  PERFORMANCE REPORT")
+    await send_styled_report(ctx, text, heading=f"{capper_name}  /  RECAP")
 
 
 # =====================

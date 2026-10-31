@@ -2816,6 +2816,12 @@ async def find_remaining_authorized_grade(
 # EVENTS
 # =====================
 
+@bot.check
+async def require_server_context(ctx: commands.Context) -> bool:
+    # Reports and exports must never query all servers from a direct message.
+    return ctx.guild is not None
+
+
 @bot.event
 async def on_ready() -> None:
     print(f"Logged in as {bot.user}")
@@ -3448,7 +3454,9 @@ async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, content, risk_units, odds_text, result, net_units
         FROM bets
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for bet_id, content, old_risk, odds_text, result, old_net in bet_rows:
@@ -3476,7 +3484,9 @@ async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
         """
         SELECT message_id, content, risk_units
         FROM pending
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for message_id, content, old_risk in pending_rows:
@@ -3520,7 +3530,9 @@ async def fix_bet_dates_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, content, created_utc, graded_utc, bet_date
         FROM bets
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for bet_id, content, created_utc, graded_utc, old_bet_date in bet_rows:
@@ -3543,7 +3555,9 @@ async def fix_bet_dates_cmd(ctx: commands.Context) -> None:
         """
         SELECT message_id, content, created_utc, bet_date
         FROM pending
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for message_id, content, created_utc, old_bet_date in pending_rows:
@@ -3571,8 +3585,9 @@ async def recalc_multipliers_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, risk_units, odds_text, net_units
         FROM bets
-        WHERE result = 'win' AND LOWER(odds_text) LIKE '%x%'
-        """
+        WHERE guild_id = ? AND result = 'win' AND LOWER(odds_text) LIKE '%x%'
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     checked = 0
@@ -3623,9 +3638,10 @@ async def backfill_wager_types_cmd(
         """
         SELECT id, capper, content, created_utc, risk_units, odds_text, sport, league, market
         FROM bets
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for bet_id, capper_name, content, created_utc, risk, odds_text, old_sport, old_league, old_market in bet_rows:
@@ -3681,9 +3697,10 @@ async def backfill_wager_types_cmd(
         """
         SELECT message_id, capper, content, created_utc, risk_units, odds_text, sport, league, market
         FROM pending
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for message_id, capper_name, content, created_utc, risk, odds_text, old_sport, old_league, old_market in pending_rows:
@@ -3766,9 +3783,10 @@ async def fix_sports_cmd(
         """
         SELECT id, content, market, odds_text, sport, league
         FROM bets
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for bet_id, content, market, odds_text, old_sport, old_league in bet_rows:
@@ -3808,9 +3826,10 @@ async def fix_sports_cmd(
         """
         SELECT message_id, content, market, odds_text, sport, league
         FROM pending
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for message_id, content, market, odds_text, old_sport, old_league in pending_rows:
@@ -4445,19 +4464,19 @@ async def force_sport_cmd(
         """
         SELECT message_id, sport, league
         FROM bets
-        WHERE UPPER(sport) = ?
+        WHERE guild_id = ? AND UPPER(sport) = ?
           AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10), substr(created_utc, 1, 10)) BETWEEN ? AND ?
         """,
-        (old_sport, start_iso, end_iso),
+        (int(ctx.guild.id), old_sport, start_iso, end_iso),
     ).fetchall()
     pending_rows = cur.execute(
         """
         SELECT message_id, sport, league
         FROM pending
-        WHERE UPPER(sport) = ?
+        WHERE guild_id = ? AND UPPER(sport) = ?
           AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) BETWEEN ? AND ?
         """,
-        (old_sport, start_iso, end_iso),
+        (int(ctx.guild.id), old_sport, start_iso, end_iso),
     ).fetchall()
 
     for table, rows in (("bets", bet_rows), ("pending", pending_rows)):

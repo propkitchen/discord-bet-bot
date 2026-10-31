@@ -46,7 +46,7 @@ class NovemberCommandTests(unittest.TestCase):
         )
         row = ("", "PropKitchen", "win", 1, .86,
                "🏈 :49ers: Brock Purdy OVER 18.5 Rush Yards",
-               "", "-116", "NFL", "https://discord.com/channels/1/2/3", "STRAIGHT", "")
+               "", "-116", "NFL", "https://discord.com/channels/1/2/3", "STRAIGHT", "", "2026-10-30")
         text = row_fn(row)
         self.assertIn("Brock Purdy o18.5 Rush Yards", text)
         self.assertNotIn(":49ers:", text)

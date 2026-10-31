@@ -54,7 +54,8 @@ EXPLICIT_EVENTS: Dict[str, Sequence[str]] = {
         "COPA AMERICA", "COPA LIBERTADORES", "FA CUP",
         "EFL CUP", "CARABAO CUP", "EL CLASICO", "CONCACAF",
         "EURO 2028", "EUROS", "AFC ASIAN CUP",
-        "AFC CHAMPIONS LEAGUE",
+        "AFC CHAMPIONS LEAGUE", "AFC WIMBLEDON",
+        "AFC BOURNEMOUTH",
     ),
     "TENNIS": (
         "TENNIS", "ATP", "WTA", "WIMBLEDON", "ROLAND GARROS",

@@ -1632,20 +1632,23 @@ def build_bet_result_line(
 ) -> str:
     graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform, bet_date = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
-    parts = [icon]
-    if include_capper:
-        parts.append(f"**{capper}**")
-
     if category == WAGER_DFS:
-        # The original slip may contain many emojis/players; recaps only need
-        # the wager date, risk, app, actual multiplier, and realized profit.
+        # Keep the capper's DFS recap as clean as "✅ 10/4 | 0.3u | PrizePicks | 2.1x".
+        # Never echo decorative post emojis or a long list of individual legs.
+        date_text = format_recap_wager_date(bet_date, graded)
+        prefix = f"{icon} **{capper}**" if include_capper else f"{icon} {date_text}"
+        parts = [prefix]
+        if include_capper:
+            parts.append(date_text)
         parts.extend([
-            format_recap_wager_date(bet_date, graded),
             format_compact_units(risk),
             platform or "DFS Slip",
             format_odds_display(odds),
         ])
     else:
+        parts = [icon]
+        if include_capper:
+            parts.append(f"**{capper}**")
         parts.extend([
             format_compact_units(risk),
             compact_bet_description(content, market),

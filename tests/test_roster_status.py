@@ -62,7 +62,7 @@ class CapperStatusTests(unittest.TestCase):
 
     def test_only_named_cappers_deactivated(self):
         self.assertEqual(self.inactive, {"pxs", "daijonbets", "mikelocks", "mattlocks"})
-        self.assertEqual(len(self.roster), 10)
+        self.assertEqual(len(self.roster), 11)
         for capper in self.roster.values():
             if capper.name.lower() in self.inactive:
                 self.assertIsNone(self.by_id(capper.user_id))

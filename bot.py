@@ -1017,7 +1017,11 @@ def parse_analytics_fields(text: str, odds_text: str) -> Dict[str, object]:
     wager_category = infer_wager_category(text, odds_text, platform_type, bet_type)
     sports = infer_sports(text)
 
-    if wager_category == WAGER_DFS and ("MIXED" in text.upper() or len(sports) > 1):
+    # MIXED is an intentional multi-sport classification, not a missing sport.
+    # Applies to both DFS slips and sportsbook parlays; never split a single
+    # multi-sport payout across the sports in a performance recap.
+    explicitly_mixed = re.search(r"(?<![A-Z0-9])MIXED(?![A-Z0-9])", text.upper()) is not None
+    if explicitly_mixed or (len(sports) > 1 and wager_category in {WAGER_DFS, WAGER_PARLAY}):
         sport = "MIXED"
     else:
         sport = sports[0] if sports else "UNKNOWN"

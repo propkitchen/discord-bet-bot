@@ -3226,6 +3226,23 @@ async def ping(ctx: commands.Context) -> None:
     await ctx.send("pong")
 
 
+@bot.command(name="version", aliases=["build", "botversion"])
+async def version_cmd(ctx: commands.Context) -> None:
+    """Report the actual Render branch and commit serving Discord requests."""
+    branch = os.getenv("RENDER_GIT_BRANCH", "unavailable")
+    commit = os.getenv("RENDER_GIT_COMMIT", "")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+        commit = "unavailable"
+    else:
+        commit = commit[:12]
+    await ctx.send(
+        "**BetTracker Live Build**\n"
+        f"Branch: `{branch}`\n"
+        f"Commit: `{commit}`\n"
+        "Release: **November 2026 + report diagnostics**"
+    )
+
+
 @bot.command(name="trackcheck", aliases=["checktracking", "channelcheck"])
 async def trackcheck_cmd(ctx: commands.Context) -> None:
     if ctx.guild is None or bot.user is None:

@@ -327,6 +327,11 @@ def infer_sports_from_text(text: str) -> List[str]:
     emojis = {code for icon, code in EMOJI_CODES.items() if icon in upper}
     explicit = _matches(upper, EXPLICIT_EVENTS)
 
+    # AFC Wimbledon is a soccer club, not the Wimbledon tennis event.
+    # The substring WIMBLEDON alone would otherwise trigger both leagues.
+    if _has(upper, "AFC WIMBLEDON") and "TENNIS" in explicit:
+        explicit.remove("TENNIS")
+
     # Explicit sport/event labels are authoritative even if post emojis,
     # player names, or team names are contradictory decorations.
     if explicit:

@@ -33,7 +33,20 @@ import os
 import re
 import shlex
 import sqlite3
+import time
 
+from bettracker_autoclean import (
+    DEFAULT_RETENTION_DAYS,
+    defer_message,
+    dequeue_message,
+    disable_autoclean,
+    due_messages,
+    enqueue_message,
+    ensure_autoclean_schema,
+    get_retention_days,
+    queued_count,
+    set_retention_days,
+)
 from bettracker_excel import export_xlsx
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -491,6 +504,8 @@ def ensure_schema() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_duplicate_key ON bets(capper, duplicate_key, created_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_duplicate_key ON pending(capper, duplicate_key, created_utc);")
     conn.commit()
+    # A separate lightweight queue; existing graded/pending wager data is unchanged.
+    ensure_autoclean_schema(conn)
 
 
 ensure_schema()
@@ -2961,6 +2976,175 @@ async def find_remaining_authorized_grade(
 
 
 # =====================
+# COMMAND-CHANNEL AUTO-CLEAN (OPT-IN)
+# =====================
+
+def is_autoclean_protected_channel(channel: discord.abc.GuildChannel) -> bool:
+    """Never delete betting posts or curated recap/results channels."""
+    channel_id = int(channel.id)
+    channel_name = str(getattr(channel, "name", "")).lower()
+    return (
+        channel_id == SUMMARY_CHANNEL_ID
+        or is_trackable_channel(channel_id)
+        or "recap" in channel_name
+        or "result" in channel_name
+    )
+
+
+def maybe_queue_command_message(message: discord.Message) -> None:
+    """Track only new command-channel messages, not old chat history."""
+    if message.guild is None or is_autoclean_protected_channel(message.channel):
+        return
+    is_own_reply = bot.user is not None and message.author.id == bot.user.id
+    is_user_command = (not message.author.bot) and is_bot_command_message(message)
+    if not (is_own_reply or is_user_command):
+        return
+    try:
+        enqueue_message(
+            conn,
+            int(message.guild.id),
+            int(message.channel.id),
+            int(message.id),
+            int(message.created_at.timestamp()),
+        )
+    except sqlite3.Error as exc:
+        print(f"Autoclean queue error: {type(exc).__name__}: {exc}")
+
+
+@bot.command(name="autoclean", aliases=["commandcleanup", "cleancommands"])
+@commands.has_permissions(manage_guild=True)
+async def autoclean_cmd(
+    ctx: commands.Context, action: str = "status", duration: str = "3d"
+) -> None:
+    """Manage this command channel's cleanup independently for each Discord server."""
+    if ctx.guild is None:
+        await ctx.send("Run this in the Discord server's command channel.")
+        return
+
+    gid, cid = int(ctx.guild.id), int(ctx.channel.id)
+    mode = action.strip().lower()
+    if mode in {"status", "check"}:
+        days = get_retention_days(conn, gid, cid)
+        queued = queued_count(conn, gid, cid)
+        if days is None:
+            await ctx.send(
+                "🧹 **Command Auto-Clean: OFF** for this channel.\n"
+                "Enable with `bt!autoclean on 3d` (Manage Server required).\n"
+                "The recap and capper channels are never cleaned."
+            )
+        else:
+            await ctx.send(
+                f"🧹 **Command Auto-Clean: ON** for <#{cid}>\n"
+                f"Retention: **{days} day(s)** | Scheduled: **{queued} messages**\n"
+                "Removes new `bt!` commands and BetTracker replies only.\n"
+                "Use `bt!autoclean off` to disable and cancel scheduled removals."
+            )
+        return
+
+    if mode in {"off", "disable"}:
+        queued_removed = disable_autoclean(conn, gid, cid)
+        await ctx.send(
+            f"✅ **Auto-Clean OFF** for <#{cid}>.\n"
+            f"Cancelled **{queued_removed}** scheduled message deletions. "
+            "Messages already deleted cannot be restored."
+        )
+        return
+
+    if mode not in {"on", "enable"}:
+        await ctx.send(
+            "Use `bt!autoclean status`, `bt!autoclean on 3d`, "
+            "or `bt!autoclean off`. Retention supports **1–30 days**."
+        )
+        return
+
+    match = re.fullmatch(r"(\d{1,2})(?:d|days?)?", duration.strip().lower())
+    if not match or not 1 <= int(match.group(1)) <= 30:
+        await ctx.send("Choose **1–30 days**, for example `bt!autoclean on 3d`.")
+        return
+    if is_autoclean_protected_channel(ctx.channel):
+        await ctx.send(
+            "🚫 Auto-Clean cannot be enabled in a betting, recap, or results channel. "
+            "Run it in your dedicated bot-commands channel instead."
+        )
+        return
+
+    member = ctx.guild.me or (
+        ctx.guild.get_member(bot.user.id) if bot.user is not None else None
+    )
+    perms = ctx.channel.permissions_for(member) if member is not None else None
+    if not perms or not (
+        perms.view_channel and perms.read_message_history
+        and perms.manage_messages and perms.send_messages
+    ):
+        await ctx.send(
+            "⚠️ Auto-Clean was **not enabled**. Give BetTracker "
+            "**View Channel**, **Read Message History**, **Send Messages**, "
+            "and **Manage Messages** permission in this channel."
+        )
+        return
+
+    days = int(match.group(1))
+    set_retention_days(conn, gid, cid, days)
+    maybe_queue_command_message(ctx.message)
+    await ctx.send(
+        f"✅ **Auto-Clean ON** for <#{cid}> — **{days} day(s)**.\n"
+        "New `bt!` commands and BetTracker replies/files posted **in this channel** "
+        "will be removed after the selected period.\n"
+        "Older messages, original bets, and posts in recap/results channels are safe. "
+        "Use `bt!autoclean off` at any time."
+    )
+
+
+@tasks.loop(minutes=5)
+async def autoclean_loop() -> None:
+    """Best-effort cleanup of explicitly queued IDs; never sweep channel history."""
+    now_epoch = int(time.time())
+    for guild_id, channel_id, message_id in due_messages(
+        conn, now_epoch, limit=30
+    ):
+        guild = bot.get_guild(guild_id)
+        channel = guild.get_channel(channel_id) if guild is not None else None
+        if channel is None:
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
+            continue
+        if is_autoclean_protected_channel(channel):
+            # Channel was changed into a betting/recap channel after queuing.
+            # Cancel the deletion instead of retaining a risky queued job.
+            dequeue_message(conn, guild_id, channel_id, message_id)
+            continue
+
+        member = guild.me or (
+            guild.get_member(bot.user.id) if bot.user is not None else None
+        )
+        perms = channel.permissions_for(member) if member is not None else None
+        if not perms or not (
+            perms.view_channel and perms.read_message_history and perms.manage_messages
+        ):
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
+            continue
+
+        try:
+            msg = await channel.fetch_message(message_id)  # type: ignore[attr-defined]
+            await msg.delete()
+        except discord.NotFound:
+            # Message was already removed manually; no reason to retry.
+            pass
+        except discord.Forbidden:
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
+            continue
+        except discord.HTTPException as exc:
+            print(f"Autoclean delete retry later: {type(exc).__name__}")
+            defer_message(conn, guild_id, channel_id, message_id, now_epoch + 3600)
+            continue
+        dequeue_message(conn, guild_id, channel_id, message_id)
+
+
+@autoclean_loop.before_loop
+async def before_autoclean_loop() -> None:
+    await bot.wait_until_ready()
+
+
+# =====================
 # EVENTS
 # =====================
 
@@ -2975,10 +3159,15 @@ async def on_ready() -> None:
     print(f"Logged in as {bot.user}")
     if AUTOPOST_ENABLED and not autopost_loop.is_running():
         autopost_loop.start()
+    if not autoclean_loop.is_running():
+        autoclean_loop.start()
 
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
+    # The same channel-specific retention policy applies to every capper's
+    # bt! command and to BetTracker's own responses (including exported files).
+    maybe_queue_command_message(message)
     if bot.user and message.author.id == bot.user.id:
         return
 
@@ -3347,7 +3536,8 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"
         "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`, `bt!setpayout 2x`\n"
         "`bt!force_sport NBA WNBA 2026-07-01 2026-07-31`\n"
-        "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`"
+        "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`\n"
+        "Command-channel cleanup: `bt!autoclean on 3d`, `off`, or `status` (admin only)."
     )
 
 @bot.command()

@@ -3526,7 +3526,8 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"
         "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`, `bt!setpayout 2x`\n"
         "`bt!force_sport NBA WNBA 2026-07-01 2026-07-31`\n"
-        "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`"
+        "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`\n"
+        "Command-channel cleanup: `bt!autoclean on 3d`, `off`, or `status` (admin only)."
     )
 
 @bot.command()

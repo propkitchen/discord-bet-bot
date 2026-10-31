@@ -1461,7 +1461,14 @@ def fetch_recent_bets(
         f"""
         SELECT
             graded_utc, capper, result, risk_units, net_units, content, market,
-            odds_text, sport, jump_url, {WAGER_CATEGORY_SQL} AS normalized_category,
+            odds_text, sport,
+            CASE
+                WHEN jump_url LIKE 'https://discord.com/channels/%' THEN jump_url
+                WHEN guild_id > 0 AND channel_id > 0 AND message_id > 0 THEN
+                    'https://discord.com/channels/' || guild_id || '/' || channel_id || '/' || message_id
+                ELSE COALESCE(jump_url, '')
+            END AS jump_url,
+            {WAGER_CATEGORY_SQL} AS normalized_category,
             COALESCE(platform, sportsbook, '')
         FROM bets
         WHERE {where_sql}
@@ -1641,6 +1648,8 @@ def build_filtered_summary_text(
     if not bets:
         return "\n".join(lines)
 
+    if int(overall["total"]) > len(bets):
+        lines.append(f"Showing the latest {len(bets)} of {int(overall['total'])} wagers. Full history: `bt!export`.")
     if not capper_name:
         lines.append("\n**Bets:**")
         lines.extend(build_bet_result_line(row, include_capper=True) for row in bets)
@@ -3849,11 +3858,11 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
         """
         SELECT id, message_id, channel_id, capper, created_utc, risk_units, result, net_units
         FROM bets
-        WHERE content = '' OR content IS NULL
+        WHERE guild_id = ? AND (content = '' OR content IS NULL)
         ORDER BY created_utc DESC
         LIMIT ?
         """,
-        (limit,),
+        (int(ctx.guild.id), limit),
     ).fetchall()
 
     updated = checked = corrected_units = 0

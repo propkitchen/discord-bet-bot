@@ -86,13 +86,15 @@ class RecapLayoutTests(unittest.TestCase):
             "format_recap_wager_date", "compact_bet_description", "build_bet_result_line",
             "format_record", "fetch_filtered_totals", "stats_values",
             "fetch_group_breakdown", "fetch_recent_bets", "wager_category_label",
-            "recap_sport_order", "build_filtered_summary_text",
+            "recap_sport_order", "sport_recap_emoji", "build_filtered_summary_text",
         ):
             load(name, scope)
         scope["SPORT_RECAP_ORDER"] = (
             "NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL", "NCAAB",
             "SOCCER", "TENNIS", "GOLF", "UFC", "MMA", "MIXED", "UNKNOWN",
         )
+        scope["SPORT_RECAP_EMOJI"] = {"NBA": "🏀", "WNBA": "🏀", "NCAAB": "🏀",
+                                     "NFL": "🏈", "NCAAF": "🏈", "MIXED": "🧩"}
         self.fn = scope["build_filtered_summary_text"]
 
     def tearDown(self):

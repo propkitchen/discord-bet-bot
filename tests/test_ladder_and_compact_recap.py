@@ -12,7 +12,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock
 
-from bettracker_ladders import parse_ladder_post, is_ladder_post
+from bettracker_ladders import parse_ladder_post, is_ladder_post, has_multiple_staked_lines
 
 SOURCE = (Path(__file__).resolve().parents[1] / "bot.py").read_text()
 TREE = ast.parse(SOURCE)
@@ -59,6 +59,12 @@ class LadderParserTests(unittest.TestCase):
         for text in examples:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_ladder_post(text)
+
+    def test_unmarked_multistake_cannot_be_recorded_as_one_bet(self):
+        text = ".75u 225+ Pass Yards (-110)\n.5u 250+ Pass Yards (+120)"
+        self.assertTrue(has_multiple_staked_lines(text))
+        self.assertFalse(is_ladder_post(text))
+        self.assertFalse(has_multiple_staked_lines("1u Knicks ML (-110)"))
 
     def test_ladder_indicator_does_not_confuse_plain_wager(self):
         self.assertFalse(is_ladder_post("1u Scottie Barnes over 20.5 Pts (-110)"))

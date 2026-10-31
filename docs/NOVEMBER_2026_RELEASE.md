@@ -1,67 +1,58 @@
-# BetTracker — November 2026 Release
+# BetTracker — November 2026 Update (v0.1.0 Candidate)
 
-**Status:** Development / not approved for production  
-**Development branch:** `release/november-2026-bot` (branched from `commercial-dev`)  
-**Production branch:** `main` — do not change until testing and owner approval  
-**Initial version label:** `v0.1.0` (proposed; use when release is approved, not before)  
-**Patches thereafter:** `v0.1.1`, `v0.1.2`, etc.  
-**Next feature release:** `v0.2.0`
+**Status: DRAFT — NOT DEPLOYED**  
+**Development:** `release/november-2026-bot` → draft PR #1 into `commercial-dev`  
+**Production:** `main` remains unchanged until approval.  
+**Patch releases:** `v0.1.1`, `v0.1.2`, etc. after the major update is released.
 
-## Release rhythm
+## Implemented on November development branch (not yet live)
 
-1. Collect and lock a focused batch of features/bugs for a named release.
-2. Implement changes on a development/release branch; never edit `main` directly.
-3. Run automated syntax and behavioral regression tests, review the diff, and test with actual Discord posts in a safe environment.
-4. Only after approval, merge/deploy to production and verify startup logs, live commands, tracking, grading, recap, and database health.
-5. During the stabilization period, ship narrowly scoped patch releases for confirmed bugs.
-6. Record changes and new issues; start the next feature release only after stability is established.
+- [x] Changed normal recap bet lines to `✅ | 1u | Brock Purdy o18.5 Rush Yards | -116 | +0.86u | jump` style. Removes decorative/custom emojis from the summary without editing source Discord posts.
+- [x] Changed detailed lists to show the newest 75 bets, rather than only the oldest 75; note when a listing is truncated. Period totals are computed independently over all matching rows.
+- [x] Added `bt!pending` (own bets), `bt!pending all`, `bt!pending gr8`, and paginated `bt!pending all 2`, with clickable original bet links.
+- [x] Recognize dates such as `10/18/2026`, `2026-10-18`, `Oct 18 2026`; support `last 14 days`, `October 2026`, `10/2026` and two-date ranges. Date parsing must never turn a valid date into a prop search.
+- [x] Recognize `NBA 2026 season` using verified 2026-10-20 opening night. Other seasons require verified start dates, never assumptions.
+- [x] Support shortcut forms `bt!PropKitchen NBA October`, `bt!last 14 days NBA` without requiring `bt!capper` or `bt!leaderboard`.
+- [x] Quieter format feedback: suppress automatic warnings on replies and harmless odds discussions; avoid duplicate cached edit events.
+- [x] New bets default to their *posting day in ET* unless an explicit game date is supplied; future-game posts still need a written intended date.
+- [x] Add `bt!setpayout 2x` to correct actual flex/adjusted wins, with audit entry, authorization and automatic net-unit recalculation. Can be used in reply or with an original Discord message link.
+- [x] Configure monthly summaries for the **3rd** of the following month (covers previous month, not new month). Add `bt!monthlyroles @FirstVIPRole @SecondVIPRole` for exact opt-in role tagging. No roles are guessed or pinged before setup.
+- [x] Persist autopost completion keys so restarts don't repeat scheduled recaps.
+- [x] Default `bt!export` to polished Excel Summary + Bets workbook, filters, frozen headers, correct units, safe text, clickable Discord links. Raw CSV remains `bt!exportcsv` (admin).
+- [x] Recover a Discord jump link from stored message/channel/guild IDs when the original link field is missing and IDs are known; never invent old odds/players.
+- [x] Separate departed `pxs` (Stevie) and paused `DaijonBets`, `mikelocks`, `mattlocks` from new active tracking without modifying stored IDs or historical bets.
+- [x] Scope `clear_pending`, repair/backfill commands, exports, manual correction references and reports by Discord guild; block accidental cross-guild DM reports.
+- [x] Add `bt!migrateguild preview` / `bt!migrateguild CONFIRM` as owner-only safe migration for legacy `guild_id=0` records. Reassign only rows supported by actual server channels or exact Discord jump URL guild matches.
+- [x] Add GitHub CI compilation, dependency install, and isolated regression tests including real XLSX round-trip inspection.
 
-## Core November scope
+## Mandatory steps before release
 
-### P0 — Data protection and correctness
-- [ ] Finish guild/server isolation of all admin/maintenance commands and database access.
-- [ ] Restrict raw full-database backups to the platform owner, not every server manager.
-- [ ] Ensure graded → pending transitions preserve `guild_id`.
-- [ ] Restore historical PropKitchen records from `guild_id=0` safely **only after verifying the correct Discord server ID**; no cross-tenant fallback queries.
-- [ ] Verify win/loss/push/void/regrade calculations and report totals against saved examples.
-- [ ] Investigate missing or truncated NBA/other recent bets in reports (current query sorts oldest-first before applying a 75-item cap).
-- [ ] Add independent automated checks to catch release-breaking problems.
+- [ ] Confirm latest GitHub Actions tests are green for the final commit.
+- [ ] Independently review the complete diff and check for accidental behavior changes.
+- [ ] Back up the actual persistent Render SQLite database **before** any migration.
+- [ ] Confirm the correct PropKitchen Discord server and test the legacy `guild_id=0` migration preview, including any old/deleted channels that cannot be verified.
+- [ ] Perform a staged/manual live test of tracking, odds, all grade reactions, ungrading, regrading, daily/monthly queries, revised dates, unknown commands and warning behavior; do not run a second live bot with production token.
+- [ ] Compare reported historical monthly capper units, win/loss totals and NBA/DFS records with existing authoritative tracker snapshots; no guessed data corrections.
+- [ ] Verify `bt!pending` jump URLs and modified permission behavior with at least one active capper account.
+- [ ] Verify exactly the intended two VIP role mentions with `bt!monthlyroles` after deployment.
+- [ ] Owner approves the precise `main` merge / Render deployment and rollback plan.
 
-### P1 — Capper experience
-- [ ] Quiet noisy automatic format warnings, especially replies and duplicate message-edit events.
-- [ ] Support flexible natural-text straight-bet format while preserving required units, actual odds, and wager description.
-- [ ] Improve sports/platform detection from reliable text clues; never invent unknown leagues or odds.
-- [ ] Use posting day as an explicit, documented default only for same-day wagers; preserve explicit future dates; define late-night and grading behavior.
-- [ ] Improve readable Discord recaps and reports, including a clear complete-bet option and clickable source links.
-- [ ] Correct capper roster only after user names departing/new cappers; **never delete historical graded bets**.
-- [ ] Keep existing user IDs, channel IDs, saved betting data, and production settings unchanged except specifically authorized roster/configuration changes.
+## Still open / do not imply complete
 
-### P2 — Exports and quality
-- [ ] Professional XLSX report with Summary and Bets worksheets, frozen/filterable headers, formats, and clickable Discord jump links.
-- [ ] Keep a separate advanced/admin raw CSV option.
-- [ ] Regression testing for changed commands and export calculations.
-- [ ] Clean up code incrementally, not a risky wholesale rewrite.
+- [ ] Legacy records showing `Bet details unavailable`, `Odds: N/A` or no reconstructable message link: determine which can be safely retrieved from Discord using scoped `bt!backfill_content`. Don't invent missing odds or change historic net units without an audit.
+- [ ] Capper report display pagination beyond latest 75. The XLSX export provides the full selected ledger; Discord details remain capped and labeled as such.
+- [ ] Complete performance/accuracy audit and deeper end-to-end reaction-grade tests under a nonproduction bot token.
+- [ ] Add additional verified NBA/NFL/MLB/WNBA season calendars (only NBA 2026 opening date verified for this release).
+- [ ] Check `sgtprops` roster mapping seen in historical recap versus the current hardcoded active capper registry; don't assign an unverified Discord user ID.
+- [ ] Evaluate per-capper private report channels and independent bot-command channels *after* reviewing Discord roles and member privacy. Do not automatically create channels.
+- [ ] Evaluate historical import/migration format for cappers; do not double-count already tracked wagers.
+- [ ] Optional image/OCR experiment (not enabled, no usage billed).
+- [ ] Dashboard, OAuth, multi-customer SaaS self-service and billing (later milestone).
 
-## Deferred / not in this release
+## Version and patch policy
 
-- Full web dashboard, OAuth, paid subscriptions, and client self-service.
-- Paid screenshot/vision recognition. Optional free-tier OCR may be evaluated only with owner approval, explicit quotas, and no new charges.
-- Automatic Render deployment/production rollout without review.
+Major update: batch changes, review tests, obtain release approval, then deploy.  
+Patch `v0.1.1` and subsequent: narrowly fix observed production issues without mixing in new features.  
+Next planned feature update only after the released version has stabilized.
 
-## Release gate
-
-Do not deploy until:
-- [ ] Code compiles and automated tests pass.
-- [ ] Discord tracking + reaction grading + ungrading + regrading pass manually.
-- [ ] Reports, date boundaries, and recent-bet filtering are verified.
-- [ ] Cross-server data isolation and raw-backup permissions are verified.
-- [ ] Existing data is backed up and the historical guild-ID migration is understood.
-- [ ] The owner approves the exact release and we have a rollback path.
-
-## Tracking patches
-
-| Version | Status | Change summary |
-|---|---|---|
-| v0.1.0 | Planned | November feature and hardening release |
-| v0.1.1 | Reserved | First post-release bug-fix patch |
-| v0.1.2 | Reserved | Second post-release bug-fix patch |
+The branch and PR are development artifacts, not proof the live bot has been updated.

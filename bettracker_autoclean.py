@@ -147,6 +147,22 @@ def dequeue_message(
         )
 
 
+def defer_message(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    channel_id: int,
+    message_id: int,
+    retry_epoch: int,
+) -> None:
+    """Retry later without letting one inaccessible channel starve others."""
+    with conn:
+        conn.execute(
+            "UPDATE autoclean_queue SET delete_after_epoch = ? "
+            "WHERE guild_id = ? AND channel_id = ? AND message_id = ?",
+            (int(retry_epoch), int(guild_id), int(channel_id), int(message_id)),
+        )
+
+
 def queued_count(
     conn: sqlite3.Connection, guild_id: int, channel_id: int
 ) -> int:

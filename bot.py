@@ -48,6 +48,7 @@ from bettracker_autoclean import (
     set_retention_days,
 )
 from bettracker_excel import export_xlsx
+from bettracker_ladders import is_ladder_post, parse_ladder_post
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -506,6 +507,25 @@ def ensure_schema() -> None:
     conn.commit()
     # A separate lightweight queue; existing graded/pending wager data is unchanged.
     ensure_autoclean_schema(conn)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ladder_sources (
+            source_message_id INTEGER PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            capper_user_id INTEGER NOT NULL,
+            rung_count INTEGER NOT NULL,
+            created_utc TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ladder_rungs (
+            source_message_id INTEGER NOT NULL,
+            rung_number INTEGER NOT NULL,
+            tracked_message_id INTEGER NOT NULL UNIQUE,
+            PRIMARY KEY (source_message_id, rung_number)
+        )
+    """)
+    conn.commit()
 
 
 ensure_schema()
@@ -3252,6 +3272,120 @@ async def before_autoclean_loop() -> None:
 
 
 # =====================
+# MULTI-RUNG LADDER TRACKING
+# =====================
+
+def ladder_source_exists(message_id: int) -> bool:
+    return cur.execute(
+        "SELECT 1 FROM ladder_sources WHERE source_message_id = ?",
+        (int(message_id),),
+    ).fetchone() is not None
+
+
+async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
+    """One original capper post -> one separately gradeable bot reply per rung."""
+    content = message_to_text(message)
+    if not is_ladder_post(content):
+        return False
+    try:
+        ladder = parse_ladder_post(content)
+    except ValueError as exc:
+        await send_temporary_notice(
+            message,
+            f"🪜 **Ladder not tracked:** {exc}\n"
+            "Add NFL, CFB, NBA, etc. to the heading and keep 2–8 "
+            "individually priced lines. Nothing was saved.",
+        )
+        return True
+
+    if message.guild is None:
+        return True
+
+    # A lone football/basketball emoji is not an unambiguous league.
+    context = ladder.preface
+    specific_sports = [
+        item for item in infer_sports(context)
+        if item not in {"FOOTBALL", "BASKETBALL", "SOFTBALL"}
+    ]
+    if len(specific_sports) != 1:
+        await send_temporary_notice(
+            message,
+            "🪜 **Ladder not tracked:** include one clear league or player "
+            "in the heading (NFL, CFB, NBA, etc.). "
+            "This avoids recording an ambiguous ladder in the wrong sport.",
+        )
+        return True
+
+    # Persist source BEFORE replies to prevent duplicate event submissions.
+    cursor = cur.execute(
+        """
+        INSERT OR IGNORE INTO ladder_sources
+        (source_message_id, guild_id, channel_id, capper_user_id, rung_count, created_utc)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(message.id), int(message.guild.id), int(message.channel.id),
+            int(capper.user_id), len(ladder.rungs), utc_iso(message.created_at),
+        ),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return True
+
+    successes = 0
+    for rung in ladder.rungs:
+        inherited = f"{ladder.preface}\n{rung.line}"
+        reply_text = (
+            f"🪜 **LADDER {rung.number}/{len(ladder.rungs)} — "
+            f"{capper.name}**\n{inherited}"
+        )
+        try:
+            child = await message.reply(
+                reply_text,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as exc:
+            print(f"Could not publish ladder rung: {type(exc).__name__}: {exc}")
+            break
+
+        inserted, duplicate_id = insert_pending(
+            child.id, int(message.guild.id), int(message.channel.id),
+            capper, message.author.id, inherited, utc_iso(message.created_at),
+            child.jump_url,
+        )
+        if not inserted:
+            try:
+                await child.delete()
+            except discord.HTTPException:
+                pass
+            print(f"Ladder rung duplicate/invalid: source={message.id} rung={rung.number}")
+            continue
+
+        cur.execute(
+            """INSERT OR IGNORE INTO ladder_rungs
+               (source_message_id, rung_number, tracked_message_id)
+               VALUES (?, ?, ?)""",
+            (int(message.id), rung.number, int(child.id)),
+        )
+        conn.commit()
+        successes += 1
+        await safe_add_reaction(child, PENDING_REACTION)
+
+    if successes == len(ladder.rungs):
+        await safe_add_reaction(message, "🪜")
+    else:
+        await send_temporary_notice(
+            message,
+            f"⚠️ **Ladder partially tracked:** {successes}/{len(ladder.rungs)} "
+            "rungs were saved. Do not repost or grade the original ladder. "
+            "Grade only the individual rung replies, and contact an admin "
+            "to resolve any missing rungs.",
+        )
+    return True
+
+
+# =====================
 # EVENTS
 # =====================
 
@@ -3301,6 +3435,11 @@ async def on_message(message: discord.Message) -> None:
         return
 
     content = message_to_text(message)
+    if is_ladder_post(content):
+        await track_ladder_post(message, capper)
+        await bot.process_commands(message)
+        return
+
     if parse_risk_units(content) is None:
         if looks_like_wager_message(message, content):
             await send_temporary_notice(
@@ -3346,12 +3485,22 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
         return
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
         return
+    if ladder_source_exists(after.id):
+        await send_temporary_notice(
+            after, "🪜 This ladder already created separately tracked replies. "
+            "Editing the original does not update their odds or stakes. "
+            "Contact an admin to correct a rung.",
+        )
+        return
 
     capper = resolve_capper_for_message(after)
     if capper is None:
         return
 
     content = message_to_text(after)
+    if is_ladder_post(content):
+        await track_ladder_post(after, capper)
+        return
     if pending_exists(after.id):
         refresh_pending_from_message(after, capper)
         return
@@ -3384,6 +3533,8 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
     if not is_trackable_channel(payload.channel_id) or bet_exists(payload.message_id):
         return
+    if ladder_source_exists(payload.message_id):
+        return
 
     channel = bot.get_channel(payload.channel_id)
     if channel is None:
@@ -3401,6 +3552,9 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
 
     content = message_to_text(message)
+    if is_ladder_post(content):
+        await track_ladder_post(message, capper)
+        return
     if pending_exists(payload.message_id):
         refresh_pending_from_message(message, capper)
         return

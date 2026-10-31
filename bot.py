@@ -4942,6 +4942,9 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if ctx.guild is None:
+        await ctx.send("BetTracker commands must be used inside a Discord server.")
+        return
     if isinstance(error, commands.CommandNotFound):
         raw = ctx.message.content[len(ctx.prefix):].strip() if ctx.prefix else ""
         tokens = split_args(raw)

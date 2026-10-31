@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Tuple
 
 import discord
 import matplotlib.pyplot as plt
+from bettracker_visuals import generate_recap_card
 from discord.ext import commands, tasks
 
 try:
@@ -1107,22 +1108,14 @@ def emoji_to_result(emoji: str) -> str:
 # CHARTS
 # =====================
 
-def generate_units_chart(title: str, rows: List[Tuple[str, float, int, int, int]]) -> io.BytesIO:
-    labels = [r[0] for r in rows]
-    values = [r[1] for r in rows]
-
-    fig, ax = plt.subplots()
-    ax.bar(labels, values)
-    ax.set_title(title)
-    ax.set_ylabel("Net Units")
-    ax.tick_params(axis="x", rotation=45)
-
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+def generate_units_chart(
+    title: str,
+    rows: List[Tuple[str, float, int, int, int]],
+    overall: Optional[Dict[str, object]] = None,
+    period_label: str = "",
+) -> io.BytesIO:
+    """Existing chart API now produces a reusable 4:5 PropKitchen social card."""
+    return generate_recap_card(title, rows, summary=overall, period_label=period_label)
 
 
 # =====================
@@ -1452,8 +1445,8 @@ async def post_leaderboard(
         league_name=league_name,
         wager_category=wager_category,
     )
-    for chunk in split_discord_text(text):
-        await channel.send(chunk)
+    for embed in make_report_embeds(text, heading=f"VIP RESULTS  /  {period_label}"):
+        await channel.send(embed=embed)
 
     if include_chart:
         rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=False)
@@ -1463,8 +1456,11 @@ async def post_leaderboard(
             if total > 0
         ]
         if chart_rows:
-            image = generate_units_chart(f"{title} Net Units", chart_rows)
-            await channel.send(file=discord.File(image, filename="units.png"))
+            image = generate_units_chart(
+                title, chart_rows, overall=stats_values(where_sql, params),
+                period_label=period_label,
+            )
+            await channel.send(file=discord.File(image, filename="propkitchen_vip_recap.png"))
 
 
 def fetch_recent_bets(
@@ -1571,6 +1567,20 @@ def split_discord_text(text: str, limit: int = 1900) -> List[str]:
     if current:
         chunks.append(current)
     return chunks or [text[:limit]]
+
+
+def make_report_embeds(text: str, heading: str = "BETTRACKER REPORT") -> List[discord.Embed]:
+    """Split long reports into styled, legible Discord embeds."""
+    reports: List[discord.Embed] = []
+    for index, chunk in enumerate(split_discord_text(text, limit=3450)):
+        embed = discord.Embed(
+            title=(heading[:180] if index == 0 else f"{heading[:165]} — PAGE {index + 1}"),
+            description=chunk,
+            colour=discord.Colour.from_rgb(166, 230, 84),
+        )
+        embed.set_footer(text="PROPKITCHEN  •  BETTRACKER  |  Complete performance records")
+        reports.append(embed)
+    return reports
 
 
 def stats_values(where_sql: str, params: Tuple[object, ...]) -> Dict[str, object]:
@@ -1789,8 +1799,8 @@ async def post_filtered_summary(
         filter_label=filter_label,
         page=page,
     )
-    for chunk in split_discord_text(text):
-        await ctx.send(chunk)
+    for embed in make_report_embeds(text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS"):
+        await ctx.send(embed=embed)
 
 
 def fetch_group_breakdown(
@@ -1910,8 +1920,8 @@ async def post_master_report(
         where_sql,
         final_params,
     )
-    for chunk in split_discord_text(text):
-        await ctx.send(chunk)
+    for embed in make_report_embeds(text, heading=f"{capper_name}  /  PERFORMANCE REPORT"):
+        await ctx.send(embed=embed)
 
 
 # =====================

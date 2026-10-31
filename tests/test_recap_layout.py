@@ -95,6 +95,10 @@ class RecapLayoutTests(unittest.TestCase):
         )
         scope["SPORT_RECAP_EMOJI"] = {"NBA": "🏀", "WNBA": "🏀", "NCAAB": "🏀",
                                      "NFL": "🏈", "NCAAF": "🏈", "MIXED": "🧩"}
+        name_node = next(x for x in TREE.body if isinstance(x, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "RECAP_MARKET_ABBREVIATIONS" for t in x.targets
+        ))
+        scope["RECAP_MARKET_ABBREVIATIONS"] = ast.literal_eval(name_node.value)
         self.fn = scope["build_filtered_summary_text"]
 
     def tearDown(self):
@@ -110,7 +114,7 @@ class RecapLayoutTests(unittest.TestCase):
         self.assertIn("**MIXED — Multi-Sport Slips**", report)
         self.assertLess(report.index("**NBA**"), report.index("**NFL**"))
         self.assertLess(report.index("**NFL**"), report.index("**MIXED — Multi-Sport Slips**"))
-        self.assertIn("10/4 | 0.3u | PrizePicks | 2.1x | +0.33u | [jump]", report)
+        self.assertIn("✅ 0.3u | PrizePicks | 2.1x | +0.33u | [jump]", report)
         self.assertIn("Brock Purdy o18.5 Rush Yards", report)
         self.assertNotIn("🥣", report)
         self.assertNotIn(":49ers:", report)

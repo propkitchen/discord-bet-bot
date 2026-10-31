@@ -60,6 +60,23 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(cur.execute("SELECT guild_id FROM pending WHERE message_id=6").fetchone()[0], 100)
         conn.close()
 
+    def test_manual_corrections_only_accept_same_guild_messages(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE bets (message_id INTEGER PRIMARY KEY, guild_id INTEGER)")
+        cur.execute("CREATE TABLE pending (message_id INTEGER PRIMARY KEY, guild_id INTEGER)")
+        cur.execute("INSERT INTO bets VALUES (201, 1)")
+        cur.execute("INSERT INTO bets VALUES (202, 2)")
+        cur.execute("INSERT INTO pending VALUES (203, 1)")
+        fn = isolate("referenced_message_id", cur=cur)
+        for message_id, expected in ((201, 201), (202, None), (203, 203), (999, None)):
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=1),
+                message=SimpleNamespace(reference=SimpleNamespace(message_id=message_id)),
+            )
+            self.assertEqual(fn(ctx), expected)
+        conn.close()
+
     def test_monthly_roles_persist_exactly_two_roles(self):
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()

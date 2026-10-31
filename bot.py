@@ -1456,11 +1456,15 @@ async def post_leaderboard(
             if total > 0
         ]
         if chart_rows:
-            image = generate_units_chart(
-                title, chart_rows, overall=stats_values(where_sql, params),
-                period_label=period_label,
-            )
-            await channel.send(file=discord.File(image, filename="propkitchen_vip_recap.png"))
+            try:
+                image = generate_units_chart(
+                    title, chart_rows, overall=stats_values(where_sql, params),
+                    period_label=period_label,
+                )
+                await channel.send(file=discord.File(image, filename="propkitchen_vip_recap.png"))
+            except Exception as exc:
+                # Presentation failures must never suppress the actual VIP recap.
+                print(f"VIP graphic unavailable: {type(exc).__name__}: {exc}")
 
 
 def fetch_recent_bets(

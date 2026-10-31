@@ -75,10 +75,10 @@ class GuildIsolationTests(unittest.TestCase):
     def test_clear_pending_cannot_delete_another_guild(self):
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()
-        cur.execute("CREATE TABLE pending (message_id INTEGER PRIMARY KEY, guild_id INTEGER, channel_id INTEGER, capper TEXT)")
+        cur.execute("CREATE TABLE pending (message_id INTEGER PRIMARY KEY, guild_id INTEGER, channel_id INTEGER, capper TEXT, created_utc TEXT)")
         cur.executemany(
-            "INSERT INTO pending VALUES (?, ?, ?, ?)",
-            [(1, 303, 10, "one"), (2, 404, 20, "two")],
+            "INSERT INTO pending VALUES (?, ?, ?, ?, ?)",
+            [(1, 303, 10, "one", "2026-10-29"), (2, 404, 20, "two", "2026-10-30")],
         )
         conn.commit()
         async def send(_message):

@@ -50,10 +50,11 @@ EXPLICIT_EVENTS: Dict[str, Sequence[str]] = {
         "SOCCER", "EPL", "PREMIER LEAGUE", "UCL", "UEFA",
         "CHAMPIONS LEAGUE", "EUROPA LEAGUE", "CONFERENCE LEAGUE",
         "MLS", "LA LIGA", "LALIGA", "BUNDESLIGA", "SERIE A",
-        "LIGUE 1", "LIGA MX", "FIFA", "WORLD CUP",
+        "LIGUE 1", "LIGA MX", "FIFA", "FIFA WORLD CUP",
         "COPA AMERICA", "COPA LIBERTADORES", "FA CUP",
         "EFL CUP", "CARABAO CUP", "EL CLASICO", "CONCACAF",
-        "EURO 2028", "EUROS",
+        "EURO 2028", "EUROS", "AFC ASIAN CUP",
+        "AFC CHAMPIONS LEAGUE",
     ),
     "TENNIS": (
         "TENNIS", "ATP", "WTA", "WIMBLEDON", "ROLAND GARROS",
@@ -113,8 +114,9 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "DALLAS WINGS", "GOLDEN STATE VALKYRIES", "INDIANA FEVER",
         "LAS VEGAS ACES", "LOS ANGELES SPARKS", "MINNESOTA LYNX",
         "NEW YORK LIBERTY", "PHOENIX MERCURY", "SEATTLE STORM",
+        "PORTLAND FIRE", "TORONTO TEMPO",
         "DREAM", "VALKYRIES", "FEVER", "ACES", "LYNX",
-        "MYSTICS", "MERCURY", "CONNECTICUT SUN",
+        "MYSTICS", "MERCURY", "CONNECTICUT SUN", "TORONTO TEMPO",
     ),
     "MLB": (
         "ARIZONA DIAMONDBACKS", "ATLANTA BRAVES", "BALTIMORE ORIOLES",
@@ -168,7 +170,8 @@ TEAM_ALIASES: Dict[str, Sequence[str]] = {
         "DORTMUND", "PARIS SAINT GERMAIN", "PSG", "JUVENTUS",
         "INTER MILAN", "AC MILAN", "NAPOLI", "ATLETICO MADRID",
         "AJAX", "BENFICA", "SPORTING CP", "CELTIC FC", "LA GALAXY",
-        "INTER MIAMI", "MIAMI FC", "SPURS",
+        "INTER MIAMI", "MIAMI FC", "SPURS", "AFC WIMBLEDON",
+        "AFC BOURNEMOUTH",
     ),
 }
 
@@ -332,9 +335,10 @@ def infer_sports_from_text(text: str) -> List[str]:
     if entities:
         return entities
 
-    # "NFC" is reliably NFL; bare "AFC" also names soccer federations
-    # and clubs, so require football context.
-    if _has(upper, "NFC") or (_has(upper, "AFC") and "FOOTBALL" in emojis):
+    # Match football conference shorthand even without a sport label.
+    # Soccer uses AFC too; known AFC club/competition names are caught
+    # above as explicit soccer terms or team names.
+    if _has(upper, "NFC") or _has(upper, "AFC"):
         return ["NFL"]
 
     if any(word in upper for word in ("NCAA", "COLLEGE")):

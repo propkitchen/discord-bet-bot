@@ -22,6 +22,6 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python source
-        run: python -m compileall -q bot.py bettracker_excel.py bettracker_visuals.py tools tests
+        run: python -m compileall -q bot.py bettracker_excel.py bettracker_visuals.py bettracker_sports.py bettracker_autoclean.py tools tests
       - name: Run isolated unit tests
         run: python -m unittest discover -s tests -v

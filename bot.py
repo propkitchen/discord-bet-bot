@@ -3773,6 +3773,13 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         "straight": f"1u | MLB | Player o5.5 Strikeouts | Odds: -120 | {short_date}",
         "parlay": f"0.5u | MLB | Parlay: Leg 1 + Leg 2 | Odds: +180 | {short_date}",
         "dfs": f"0.5u | DFS | Sleeper | Leg 1 + Leg 2 | 1.88x | MLB | {short_date}",
+        "ladder": (
+            "NFL Drake Maye Pass Yards Ladder 🪜\n"
+            ".75u 225+ Pass Yards (-110)\n"
+            ".5u 250+ Pass Yards (+120) 🪜\n"
+            ".25u 300+ Pass Yards (+240) 🪜\n"
+            ".1u 350+ Pass Yards (+500) 🪜"
+        ),
     }
     if key in templates:
         await ctx.send(f"🧾 **{key.upper()} FORMAT**\n{templates[key]}")
@@ -3782,7 +3789,7 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         f"Straight: {templates['straight']}\n"
         f"Parlay: {templates['parlay']}\n"
         f"DFS: {templates['dfs']}\n\n"
-        "Use `bt!format straight`, `bt!format parlay`, or `bt!format dfs`."
+        "Use bt!format straight, parlay, dfs, or ladder."
     )
 
 
@@ -3806,6 +3813,8 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "**Posting Help**\n"
         "`bt!format straight` | `bt!format parlay` | `bt!format dfs`\n"
         "Grades: ✅ win | ❌ loss | ➖ push | ↩️ void/refund\n"
+        "Ladders: `bt!format ladder` — add a clear league and 🪜, "
+        "then grade each bot rung reply separately.\n"
         "`bt!trackcheck` | `bt!pending` | `bt!pending all` | `bt!pending gr8`\n\n"
         "**Admin**\n"
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"

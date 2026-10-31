@@ -63,7 +63,7 @@ AUTOPOST_ENABLED = True
 AUTOPOST_HOUR_ET = 10
 AUTOPOST_MINUTE_ET = 0
 WEEKLY_POST_WEEKDAY = 0  # Monday
-MONTHLY_POST_DAY = 1     # 1st of month
+MONTHLY_POST_DAY = 3     # 3rd of month
 
 PENDING_REACTION = "📝"
 LOGGED_REACTION = "📌"
@@ -458,6 +458,12 @@ def ensure_schema() -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_correction_message ON correction_audit(message_id);")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS recap_settings (
+            guild_id INTEGER PRIMARY KEY,
+            monthly_role_ids TEXT NOT NULL DEFAULT ''
+        )
+    """)
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_graded_utc ON bets(graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_created_utc ON bets(created_utc);")
@@ -3234,6 +3240,26 @@ async def date_cmd(ctx: commands.Context, date_arg: str) -> None:
     await post_leaderboard_query(ctx, date_arg)
 
 
+@bot.command(name="monthlyroles", aliases=["setmonthlyroles", "recaproles"])
+@commands.has_permissions(manage_guild=True)
+async def monthlyroles_cmd(ctx: commands.Context, role_one: discord.Role, role_two: discord.Role) -> None:
+    """Configure exactly two server roles to tag in the monthly recap."""
+    if (ctx.guild is None or role_one.guild.id != ctx.guild.id
+            or role_two.guild.id != ctx.guild.id or role_one.is_default()
+            or role_two.is_default() or role_one.id == role_two.id):
+        await ctx.send("Mention two different VIP roles from this Discord server.")
+        return
+    cur.execute(
+        """
+        INSERT INTO recap_settings (guild_id, monthly_role_ids) VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET monthly_role_ids = excluded.monthly_role_ids
+        """,
+        (int(ctx.guild.id), f"{int(role_one.id)},{int(role_two.id)}"),
+    )
+    conn.commit()
+    await ctx.send(f"✅ The monthly recap will tag {role_one.name} and {role_two.name} on the 3rd of each month.")
+
+
 @bot.command(name="pending", aliases=["ungraded", "openbets", "unsettled"])
 async def pending_cmd(ctx: commands.Context, *, query: str = "") -> None:
     """Find ungraded wagers with direct links to react on the original post."""
@@ -4859,6 +4885,28 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 # AUTOPOST
 # =====================
 
+async def ping_monthly_vip_roles(channel: discord.abc.Messageable, month_label: str) -> None:
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return
+    setting = cur.execute(
+        "SELECT monthly_role_ids FROM recap_settings WHERE guild_id = ?", (int(guild.id),)
+    ).fetchone()
+    if not setting or not setting[0]:
+        return
+    role_ids = [int(v) for v in setting[0].split(",") if v.isdigit()]
+    roles = [guild.get_role(role_id) for role_id in role_ids]
+    roles = [role for role in roles if role is not None and not role.is_default()]
+    if not roles:
+        return
+    await channel.send(
+        f"📅 **{month_label} Monthly VIP Recap**\n"
+        + " ".join(role.mention for role in roles)
+        + "\nReview all the monthly results above, including losses and ROI.",
+        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=roles),
+    )
+
+
 _last_post_key: Dict[str, Optional[str]] = {"daily": None, "weekly": None, "monthly": None, "yearly": None}
 
 
@@ -4897,14 +4945,18 @@ async def autopost_loop() -> None:
             _last_post_key["weekly"] = week_key
             await post_period_summary(channel, banner(f"WEEKLY ({week_start} → {week_end})"), start_l, end_l)
 
-    # Monthly: previous month on the 1st
+    # Monthly: previous month on the 3rd
     if nl.day == MONTHLY_POST_DAY:
-        prev_month_ref = nl.date() - timedelta(days=1)
+        prev_month_ref = nl.date().replace(day=1) - timedelta(days=1)
         start_l, end_l = period_bounds_local("monthly", prev_month_ref)
         month_label = f"{start_l.year}-{start_l.month:02d}"
         if _last_post_key["monthly"] != month_label:
             _last_post_key["monthly"] = month_label
             await post_period_summary(channel, banner(f"MONTHLY ({month_label})"), start_l, end_l)
+            try:
+                await ping_monthly_vip_roles(channel, month_label)
+            except discord.DiscordException as exc:
+                print(f"Monthly VIP role ping failed: {type(exc).__name__}")
 
     # Yearly: previous year on Jan 1
     if nl.month == 1 and nl.day == 1:

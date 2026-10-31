@@ -4198,15 +4198,24 @@ async def setodds_cmd(ctx: commands.Context, *, odds_arg: str) -> None:
 
 
 @bot.command(name="setpayout", aliases=["flexpayout", "paidmultiplier"])
-@commands.has_permissions(manage_guild=True)
-async def setpayout_cmd(ctx: commands.Context, multiplier_text: str) -> None:
+async def setpayout_cmd(ctx: commands.Context, multiplier_text: str, message_ref: str = "") -> None:
     """Correct a settled slip's actual total payout multiplier (e.g. 25x paid 2x)."""
     if ctx.guild is None:
         await ctx.send("Use this command inside the Discord server.")
         return
     message_id = referenced_message_id(ctx)
+    if message_id is None and message_ref:
+        match = re.fullmatch(
+            r"(?:https://(?:discord\.com|discordapp\.com)/channels/(\d+)/(\d+)/(\d+)|([0-9]{15,20}))",
+            message_ref.strip(),
+        )
+        if match:
+            if match.group(1) and int(match.group(1)) != int(ctx.guild.id):
+                await ctx.send("That bet link belongs to a different Discord server.")
+                return
+            message_id = int(match.group(3) or match.group(4))
     if message_id is None:
-        await ctx.send("Reply to the original *graded* slip with `bt!setpayout 2x`.")
+        await ctx.send("Reply to the graded slip with `bt!setpayout 2x`, or use `bt!setpayout 2x <Discord message link>`.")
         return
     multiplier_text = parse_manual_odds_text(multiplier_text)
     mult = parse_multiplier_value(multiplier_text)
@@ -4215,14 +4224,19 @@ async def setpayout_cmd(ctx: commands.Context, multiplier_text: str) -> None:
         return
     row = cur.execute(
         """
-        SELECT risk_units, result, odds_text, net_units
+        SELECT risk_units, result, odds_text, net_units, capper_user_id
         FROM bets WHERE message_id = ? AND guild_id = ?
         """, (int(message_id), int(ctx.guild.id)),
     ).fetchone()
     if not row:
         await ctx.send("Graded bet not found in this server. Grade the slip first.")
         return
-    risk, result, old_odds, old_net = row
+    risk, result, old_odds, old_net, owner_user_id = row
+    can_correct = (int(ctx.author.id) in {int(owner_user_id), int(ADMIN_USER_ID)}
+                   or bool(ctx.author.guild_permissions.manage_guild))
+    if not can_correct:
+        await ctx.send("Only the original capper or a server manager can correct this payout.")
+        return
     if str(result) != "win":
         await ctx.send("This command is for a graded slip that paid out. Use grading reactions for losses/voids.")
         return

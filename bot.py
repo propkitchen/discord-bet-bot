@@ -1917,12 +1917,14 @@ def build_filtered_summary_text(
             heading = f"{sport} — Check classification"
         else:
             heading = sport
-        lines.extend([
-            "",
-            f"{sport_recap_emoji(sport)} **{heading}**",
-            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%)",
-            f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
-        ])
+        # A single-sport recap already shows the same numbers in OVERALL.
+        # Avoid making readers scan duplicate record, ROI and risk lines.
+        lines.extend(["", f"{sport_recap_emoji(sport)} **{heading}**"])
+        if len(sports) > 1:
+            lines.extend([
+                f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%)",
+                f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
+            ])
         # Full single-sport totals are counted here; a multi-sport slip belongs
         # to MIXED ONLY, never credited to two sport sections.
         category_where = f"({where_sql}) AND UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN')) = ?"

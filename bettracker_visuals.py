@@ -155,7 +155,8 @@ def generate_play_recap_card(
     put(.927, .648, f"{int(summary.get('total', 0))} GRADED", 10, subdued, True, "right")
 
     displayed = plays[:16]
-    row_gap = min(.041, .51 / max(len(displayed), 1))
+    # Give shorter multi-sport recaps breathing room without leaving a blank page.
+    row_gap = min(.075, .474 / max(len(displayed) - 1, 1))
     font_size = 12 if len(displayed) <= 12 else 11
     for idx, (result, wager) in enumerate(displayed):
         y = .604 - idx * row_gap

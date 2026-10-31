@@ -1389,7 +1389,7 @@ def wager_category_label(category: str) -> str:
     if normalized == WAGER_DFS:
         return "DFS Slips"
     if normalized == WAGER_PARLAY:
-        return "Sportsbook Parlays"
+        return "Sportsbook / Exchange Parlays"
     return "Straight Bets"
 
 
@@ -1474,6 +1474,7 @@ async def post_leaderboard(
             channel, where_sql, params,
             title="PropKitchen VIP Results",
             filters=period_label + (f" · {sport_name}" if sport_name else "")
+                    + (f" · {league_name}" if league_name else "")
                     + (f" · {wager_category_label(wager_category)}" if wager_category else ""),
             include_capper=True,
         )

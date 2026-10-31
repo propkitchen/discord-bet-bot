@@ -33,12 +33,15 @@ import os
 import re
 import shlex
 import sqlite3
+
+from bettracker_excel import export_xlsx
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import discord
 import matplotlib.pyplot as plt
+from bettracker_visuals import generate_recap_card
 from discord.ext import commands, tasks
 
 try:
@@ -54,7 +57,7 @@ except Exception:  # pragma: no cover
 PREFIX = "bt!"
 TOKEN = os.getenv("TOKEN")
 
-DB_PATH = "/var/data/bets.db"
+DB_PATH = os.getenv("DB_PATH", "/var/data/bets.db")
 REPORT_TZ = "America/New_York"
 
 SUMMARY_CHANNEL_ID = 1473454134689796146  # #bettingtracker
@@ -63,7 +66,7 @@ AUTOPOST_ENABLED = True
 AUTOPOST_HOUR_ET = 10
 AUTOPOST_MINUTE_ET = 0
 WEEKLY_POST_WEEKDAY = 0  # Monday
-MONTHLY_POST_DAY = 1     # 1st of month
+MONTHLY_POST_DAY = 3     # 3rd of month
 
 PENDING_REACTION = "📝"
 LOGGED_REACTION = "📌"
@@ -109,12 +112,20 @@ TRACKED_CHANNELS: Dict[int, Capper] = {
     1258244563726893106: Capper("hotshot", 475659527337934849),
     1281388388569579608: Capper("clipset", 684940092665757696),
     1278486906169987226: Capper("pxs", 933024893992329286),
+    1356017581558857796: Capper("mattlocks", 1242294328253218878),
     1344526479366688808: Capper("ballsout", 1345160333261668362),
     1409640332295147570: Capper("gr8", 1109269360037601411),
+    1430746272192659569: Capper("mikelocks", 1430751846125010970),
     1424256774692667422: Capper("betsbybray", 865284268745949194),
     1515610298696863885: Capper("DaijonBets", 1168899954660614155),
     1492009669395480686: Capper("sgtprops", 495687263661850634),
 }
+
+# Preserve existing capper mappings and all historical records. Inactive
+# accounts cannot create new tracked wagers, but past bets remain searchable
+# and gradeable. Reactivate by removing the capper from this set.
+# pxs = Picks x Stevie (departed); the others are on hiatus.
+INACTIVE_CAPPER_NAMES = frozenset({"pxs", "daijonbets", "mikelocks", "mattlocks"})
 
 
 # =====================
@@ -193,10 +204,15 @@ def period_bounds_local(period: str, ref: Optional[date] = None) -> Tuple[dateti
 
 
 def parse_date_yyyy_mm_dd(value: str) -> Optional[date]:
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-    except Exception:
-        return None
+    """Accept full ISO, US-slash, US-dash, and written calendar dates."""
+    clean = (value or "").strip().replace(",", "")
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m/%d/%y",
+                    "%m-%d-%Y", "%m-%d-%y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(clean, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 def local_date_from_utc_iso(value: str) -> date:
@@ -304,6 +320,7 @@ def ensure_schema() -> None:
         """
         CREATE TABLE IF NOT EXISTS pending (
             message_id INTEGER PRIMARY KEY,
+            guild_id INTEGER NOT NULL DEFAULT 0,
             channel_id INTEGER NOT NULL,
             capper TEXT NOT NULL,
             capper_user_id INTEGER NOT NULL,
@@ -339,6 +356,7 @@ def ensure_schema() -> None:
         CREATE TABLE IF NOT EXISTS bets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id INTEGER UNIQUE NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
             channel_id INTEGER NOT NULL,
             capper TEXT NOT NULL,
             capper_user_id INTEGER NOT NULL,
@@ -377,6 +395,7 @@ def ensure_schema() -> None:
 
     # Safe migrations for the existing Render database.
     pending_columns = {
+        "guild_id": "INTEGER NOT NULL DEFAULT 0",
         "bet_date": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
         "league": "TEXT NOT NULL DEFAULT ''",
@@ -400,6 +419,7 @@ def ensure_schema() -> None:
         add_column_if_missing("pending", col, definition)
 
     bet_columns = {
+        "guild_id": "INTEGER NOT NULL DEFAULT 0",
         "bet_date": "TEXT NOT NULL DEFAULT ''",
         "content": "TEXT NOT NULL DEFAULT ''",
         "jump_url": "TEXT NOT NULL DEFAULT ''",
@@ -442,6 +462,20 @@ def ensure_schema() -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_correction_message ON correction_audit(message_id);")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS recap_settings (
+            guild_id INTEGER PRIMARY KEY,
+            monthly_role_ids TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS autopost_history (
+            cadence TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            posted_utc TEXT NOT NULL,
+            PRIMARY KEY (cadence, period_key)
+        )
+    """)
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_graded_utc ON bets(graded_utc);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_created_utc ON bets(created_utc);")
@@ -985,7 +1019,11 @@ def parse_analytics_fields(text: str, odds_text: str) -> Dict[str, object]:
     wager_category = infer_wager_category(text, odds_text, platform_type, bet_type)
     sports = infer_sports(text)
 
-    if wager_category == WAGER_DFS and ("MIXED" in text.upper() or len(sports) > 1):
+    # MIXED is an intentional multi-sport classification, not a missing sport.
+    # Applies to both DFS slips and sportsbook parlays; never split a single
+    # multi-sport payout across the sports in a performance recap.
+    explicitly_mixed = re.search(r"(?<![A-Z0-9])MIXED(?![A-Z0-9])", text.upper()) is not None
+    if explicitly_mixed or (len(sports) > 1 and wager_category in {WAGER_DFS, WAGER_PARLAY}):
         sport = "MIXED"
     else:
         sport = sports[0] if sports else "UNKNOWN"
@@ -1070,22 +1108,14 @@ def emoji_to_result(emoji: str) -> str:
 # CHARTS
 # =====================
 
-def generate_units_chart(title: str, rows: List[Tuple[str, float, int, int, int]]) -> io.BytesIO:
-    labels = [r[0] for r in rows]
-    values = [r[1] for r in rows]
-
-    fig, ax = plt.subplots()
-    ax.bar(labels, values)
-    ax.set_title(title)
-    ax.set_ylabel("Net Units")
-    ax.tick_params(axis="x", rotation=45)
-
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+def generate_units_chart(
+    title: str,
+    rows: List[Tuple[str, float, int, int, int]],
+    overall: Optional[Dict[str, object]] = None,
+    period_label: str = "",
+) -> io.BytesIO:
+    """Existing chart API now produces a reusable 4:5 PropKitchen social card."""
+    return generate_recap_card(title, rows, summary=overall, period_label=period_label)
 
 
 # =====================
@@ -1182,6 +1212,10 @@ async def post_period_summary(
     end_local: datetime,
 ) -> None:
     where_sql, params = date_window_where(start_local, end_local)
+    guild = getattr(channel, "guild", None)
+    if guild is not None:
+        where_sql = f"(guild_id = ?) AND ({where_sql})"
+        params = (int(guild.id), *params)
     await post_leaderboard(
         channel,
         title,
@@ -1236,6 +1270,8 @@ def tracked_capper_display_names() -> List[str]:
     seen: set[str] = set()
     for capper in TRACKED_CHANNELS.values():
         key = capper.name.lower()
+        if key in INACTIVE_CAPPER_NAMES:
+            continue  # Hide zero-bet inactive cappers on current leaderboards.
         if key not in seen:
             seen.add(key)
             names.append(capper.name)
@@ -1409,8 +1445,8 @@ async def post_leaderboard(
         league_name=league_name,
         wager_category=wager_category,
     )
-    for chunk in split_discord_text(text):
-        await channel.send(chunk)
+    for embed in make_report_embeds(text, heading=f"VIP RESULTS  /  {period_label}"):
+        await channel.send(embed=embed)
 
     if include_chart:
         rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=False)
@@ -1420,28 +1456,45 @@ async def post_leaderboard(
             if total > 0
         ]
         if chart_rows:
-            image = generate_units_chart(f"{title} Net Units", chart_rows)
-            await channel.send(file=discord.File(image, filename="units.png"))
+            try:
+                image = generate_units_chart(
+                    title, chart_rows, overall=stats_values(where_sql, params),
+                    period_label=period_label,
+                )
+                await channel.send(file=discord.File(image, filename="propkitchen_vip_recap.png"))
+            except Exception as exc:
+                # Presentation failures must never suppress the actual VIP recap.
+                print(f"VIP graphic unavailable: {type(exc).__name__}: {exc}")
 
 
 def fetch_recent_bets(
     where_sql: str,
     params: Tuple[object, ...],
     limit: int = 75,
+    offset: int = 0,
 ) -> List[Tuple[str, str, str, float, float, str, str, str, str, str, str, str]]:
     rows = cur.execute(
         f"""
         SELECT
             graded_utc, capper, result, risk_units, net_units, content, market,
-            odds_text, sport, jump_url, {WAGER_CATEGORY_SQL} AS normalized_category,
-            COALESCE(platform, sportsbook, '')
+            odds_text, sport,
+            CASE
+                WHEN jump_url LIKE 'https://discord.com/channels/%' THEN jump_url
+                WHEN guild_id > 0 AND channel_id > 0 AND message_id > 0 THEN
+                    'https://discord.com/channels/' || guild_id || '/' || channel_id || '/' || message_id
+                ELSE COALESCE(jump_url, '')
+            END AS jump_url,
+            {WAGER_CATEGORY_SQL} AS normalized_category,
+            COALESCE(platform, sportsbook, ''),
+            COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) AS display_date
         FROM bets
         WHERE {where_sql}
-        ORDER BY graded_utc ASC
-        LIMIT ?
+        ORDER BY graded_utc DESC
+        LIMIT ? OFFSET ?
         """,
-        (*params, int(limit)),
+        (*params, int(limit), int(offset)),
     ).fetchall()
+    rows.reverse()  # Keep chronological display order for the newest matching bets.
     return [
         (
             str(graded),
@@ -1456,8 +1509,9 @@ def fetch_recent_bets(
             str(jump or ""),
             str(category or WAGER_STRAIGHT),
             str(platform or ""),
+            str(display_date or ""),
         )
-        for graded, capper, result, risk, net, content, market, odds, sport, jump, category, platform in rows
+        for graded, capper, result, risk, net, content, market, odds, sport, jump, category, platform, display_date in rows
     ]
 
 
@@ -1519,6 +1573,20 @@ def split_discord_text(text: str, limit: int = 1900) -> List[str]:
     return chunks or [text[:limit]]
 
 
+def make_report_embeds(text: str, heading: str = "BETTRACKER REPORT") -> List[discord.Embed]:
+    """Split long reports into styled, legible Discord embeds."""
+    reports: List[discord.Embed] = []
+    for index, chunk in enumerate(split_discord_text(text, limit=3450)):
+        embed = discord.Embed(
+            title=(heading[:180] if index == 0 else f"{heading[:165]} — PAGE {index + 1}"),
+            description=chunk,
+            colour=discord.Colour.from_rgb(166, 230, 84),
+        )
+        embed.set_footer(text="PROPKITCHEN  •  BETTRACKER  |  Complete performance records")
+        reports.append(embed)
+    return reports
+
+
 def stats_values(where_sql: str, params: Tuple[object, ...]) -> Dict[str, object]:
     total, risk, net, wins, losses, pushes, voids = fetch_filtered_totals(where_sql, params)
     graded = wins + losses
@@ -1547,29 +1615,77 @@ def append_stats(lines: List[str], stats: Dict[str, object]) -> None:
         ]
     )
 
+def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
+    """Remove presentation emojis and duplicate metadata from recap descriptions."""
+    description = display_bet_text(content, market, max_len=max_len + 80)
+    description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
+    description = re.sub(r":[A-Za-z0-9_]+:", "", description)
+    description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)
+    description = re.sub(r"(?i)\bOVER\s*(?=\d|\.)", "o", description)
+    description = re.sub(r"(?i)\bUNDER\s*(?=\d|\.)", "u", description)
+    description = normalize_space(description).strip(" |:-")
+    if len(description) > max_len:
+        description = description[:max_len - 3].rstrip() + "..."
+    return description or "Bet details unavailable"
+
+
+def format_recap_wager_date(bet_date: str, graded_utc: str) -> str:
+    """Short date label for DFS slips; prefer wager date over grading date."""
+    day = str(bet_date or "").strip()
+    if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", day):
+        day = local_date_from_utc_iso(graded_utc).isoformat()
+    try:
+        parsed = date.fromisoformat(day)
+        return f"{parsed.month}/{parsed.day}"
+    except ValueError:
+        return "Date N/A"
+
+
 def build_bet_result_line(
-    row: Tuple[str, str, str, float, float, str, str, str, str, str, str, str],
+    row: Tuple[str, ...],
     include_capper: bool = False,
 ) -> str:
-    _graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform = row
+    graded, capper, result, risk, net, content, market, odds, sport, jump_url, category, platform, bet_date = row
     icon = {"win": WIN_EMOJI, "loss": LOSS_EMOJI, "push": PUSH_EMOJI, "void": VOID_EMOJI}.get(result, PUSH_EMOJI)
-    description = display_bet_text(content, market)
-    jump = f"[jump]({jump_url})" if jump_url else "jump unavailable"
-    prefix = f"{icon} {format_compact_units(risk)}"
-    if include_capper:
-        prefix = f"{icon} **{capper}** | {format_compact_units(risk)}"
-
     if category == WAGER_DFS:
-        platform_part = f"{platform} | " if platform and platform.lower() not in description.lower() else ""
-        odds_part = format_odds_display(odds)
-        return (
-            f"{prefix} | {platform_part}{description} | {odds_part} | {sport} | "
-            f"{format_compact_units(net, signed=True)} | {jump}"
-        )
+        # Keep the capper's DFS recap as clean as "✅ 10/4 | 0.3u | PrizePicks | 2.1x".
+        # Never echo decorative post emojis or a long list of individual legs.
+        date_text = format_recap_wager_date(bet_date, graded)
+        prefix = f"{icon} **{capper}**" if include_capper else f"{icon} {date_text}"
+        parts = [prefix]
+        if include_capper:
+            parts.append(date_text)
+        parts.extend([
+            format_compact_units(risk),
+            platform or "DFS Slip",
+            format_odds_display(odds),
+        ])
+    else:
+        parts = [icon]
+        if include_capper:
+            parts.append(f"**{capper}**")
+        parts.extend([
+            format_compact_units(risk),
+            compact_bet_description(content, market),
+            format_odds_display(odds),
+        ])
 
+    parts.append(format_compact_units(net, signed=True))
+    parts.append(f"[jump]({jump_url})" if str(jump_url or "").startswith("https://discord.com/channels/") else "jump unavailable")
+    return " | ".join(parts)
+
+
+SPORT_RECAP_ORDER = (
+    "NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL", "NCAAB",
+    "SOCCER", "TENNIS", "GOLF", "UFC", "MMA", "MIXED", "UNKNOWN",
+)
+
+
+def recap_sport_order(label: str) -> Tuple[int, str]:
+    name = (label or "UNKNOWN").upper()
     return (
-        f"{prefix} | {description} | Odds: {format_odds_display(odds)} | {sport} | "
-        f"{format_compact_units(net, signed=True)} | {jump}"
+        SPORT_RECAP_ORDER.index(name) if name in SPORT_RECAP_ORDER else len(SPORT_RECAP_ORDER) - 2,
+        name,
     )
 
 
@@ -1582,55 +1698,84 @@ def build_filtered_summary_text(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> str:
+    """Sport-first recap; totals always include ALL bets, not just page rows."""
     overall = stats_values(where_sql, params)
+    total = int(overall["total"])
+    page_size = 75
+    max_pages = max(1, (total + page_size - 1) // page_size)
+    if page < 1 or page > max_pages:
+        return f"That recap page does not exist. Use page 1 through {max_pages}."
 
     if capper_name:
-        lines = [f"📊 **Capper: {capper_name}**"]
-        if sport_name:
-            lines.append(f"Sport: **{sport_name}**")
-        if wager_category:
-            lines.append(f"Wager Type: **{wager_category_label(wager_category)}**")
-        if filter_label:
-            lines.append(f"Search: **{filter_label}**")
-        lines.append(f"Date: **{period_label}**")
-        append_stats(lines, overall)
+        lines = [f"📊 **{capper_name} — {period_label}**"]
     else:
         lines = [f"📊 **{title}**"]
-        append_stats(lines, overall)
+    if filter_label:
+        lines.append(f"Filter: **{filter_label}**")
+    if sport_name:
+        lines.append(f"Sport: **{sport_name}**")
+    if wager_category:
+        lines.append(f"Wager Type: **{wager_category_label(wager_category)}**")
 
-    bets = fetch_recent_bets(where_sql, params, limit=75)
-    if not bets:
-        return "\n".join(lines)
+    lines.extend([
+        "",
+        f"**OVERALL** — {overall['record']} ({float(overall['win_pct']):.1f}%) | {total} bets",
+        f"Risked: {float(overall['risk']):.2f}u | Net: **{float(overall['net']):+.2f}u** | ROI: **{float(overall['roi']):.1f}%**",
+    ])
+    if int(overall.get("voids", 0)):
+        lines.append(f"Voids: {int(overall['voids'])}")
+    if not total:
+        return "\n".join(lines + ["No bets found for this selection."])
 
-    if not capper_name:
-        lines.append("\n**Bets:**")
-        lines.extend(build_bet_result_line(row, include_capper=True) for row in bets)
-        return "\n".join(lines)
+    bets = fetch_recent_bets(where_sql, params, limit=page_size, offset=(page - 1) * page_size)
+    lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
+    if max_pages > 1:
+        lines.append(f"To see other pages, repeat the command with `page 2`, `page 3`, etc. Complete export: `bt!export`.")
 
-    lines.append("\n**Bets:**")
-    categories = [wager_category] if wager_category else [WAGER_STRAIGHT, WAGER_PARLAY, WAGER_DFS]
-    for category in categories:
-        if not category:
-            continue
-        category_rows = [row for row in bets if row[10] == category]
-        category_where = f"({where_sql}) AND ({WAGER_CATEGORY_SQL}) = ?"
-        category_params = (*params, category)
-        category_stats = stats_values(category_where, category_params)
-        if int(category_stats["total"]) == 0:
-            continue
-
-        lines.append(f"\n**{wager_category_label(category)}**")
-        lines.append(
-            f"Record: **{category_stats['record']}** ({float(category_stats['win_pct']):.1f}%)"
-            f"{format_void_suffix(int(category_stats.get('voids', 0) or 0))} | "
-            f"Risked: **{float(category_stats['risk']):.2f}u**"
-        )
-        lines.append(
-            f"Net Units: **{float(category_stats['net']):+.2f}u** | "
-            f"ROI: **{float(category_stats['roi']):.1f}%** | Bets: **{int(category_stats['total'])}**"
-        )
-        lines.extend(build_bet_result_line(row) for row in category_rows)
+    sports = fetch_group_breakdown(
+        where_sql, params, "UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN'))",
+    )
+    for raw_sport, sport_stats in sorted(sports, key=lambda item: recap_sport_order(item[0])):
+        sport = str(raw_sport or "UNKNOWN").upper()
+        if sport == "MIXED":
+            heading = "MIXED — Multi-Sport Slips"
+        elif sport in {"UNKNOWN", "BASKETBALL", "FOOTBALL"}:
+            heading = f"{sport} — Check classification"
+        else:
+            heading = sport
+        lines.extend([
+            "",
+            f"🏟️ **{heading}**",
+            f"Record: **{sport_stats['record']}** ({float(sport_stats['win_pct']):.1f}%) | Bets: **{int(sport_stats['total'])}**",
+            f"Risked: {float(sport_stats['risk']):.2f}u | Net: **{float(sport_stats['net']):+.2f}u** | ROI: **{float(sport_stats['roi']):.1f}%**",
+        ])
+        # Full single-sport totals are counted here; a multi-sport slip belongs
+        # to MIXED ONLY, never credited to two sport sections.
+        category_where = f"({where_sql}) AND UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN')) = ?"
+        category_params = (*params, sport)
+        for category in (WAGER_STRAIGHT, WAGER_DFS, WAGER_PARLAY):
+            if wager_category is not None and category != wager_category:
+                continue
+            subset_where = f"({category_where}) AND ({WAGER_CATEGORY_SQL}) = ?"
+            subset_params = (*category_params, category)
+            stats = stats_values(subset_where, subset_params)
+            if not int(stats["total"]):
+                continue
+            category_rows = [
+                row for row in bets
+                if str(row[8]).upper() == sport and str(row[10]).upper() == category
+            ]
+            lines.append(
+                f"**{wager_category_label(category)}** — "
+                f"{stats['record']} | {float(stats['net']):+.2f}u | "
+                f"ROI {float(stats['roi']):.1f}% | {int(stats['total'])} bets"
+            )
+            lines.extend(build_bet_result_line(row, include_capper=not bool(capper_name))
+                         for row in category_rows)
+            if not category_rows:
+                lines.append("_Bets in this category appear on other pages._")
 
     return "\n".join(lines)
 
@@ -1645,6 +1790,7 @@ async def post_filtered_summary(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> None:
     text = build_filtered_summary_text(
         title,
@@ -1655,9 +1801,38 @@ async def post_filtered_summary(
         sport_name=sport_name,
         wager_category=wager_category,
         filter_label=filter_label,
+        page=page,
     )
-    for chunk in split_discord_text(text):
-        await ctx.send(chunk)
+    for embed in make_report_embeds(text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS"):
+        await ctx.send(embed=embed)
+
+    # A standalone, 4:5 performance graphic is easier to screenshot or post on X.
+    if capper_name and page == 1:
+        try:
+            breakdown = fetch_group_breakdown(
+                where_sql, params, "UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN'))"
+            )
+            if breakdown:
+                sport_rows = [
+                    (
+                        sport, float(stats["net"]), int(stats["wins"]),
+                        int(stats["losses"]), int(stats["pushes"]),
+                    )
+                    for sport, stats in sorted(
+                        breakdown, key=lambda pair: float(pair[1]["net"]), reverse=True
+                    )
+                ]
+                image = generate_recap_card(
+                    capper_name,
+                    sport_rows,
+                    summary=stats_values(where_sql, params),
+                    period_label=period_label,
+                    section_title="SPORT BREAKDOWN",
+                )
+                await ctx.send(file=discord.File(image, filename="propkitchen_capper_recap.png"))
+        except Exception as exc:
+            # Bot reports must succeed even when an optional image renderer fails.
+            print(f"Capper recap image unavailable: {type(exc).__name__}: {exc}")
 
 
 def fetch_group_breakdown(
@@ -1766,6 +1941,9 @@ async def post_master_report(
 
     where_parts = ["LOWER(capper) = ?"]
     params: List[object] = [capper_name.lower()]
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_local, end_local)
     where_sql, final_params = build_where(where_parts, params)
     text = build_master_report_text(
@@ -1774,8 +1952,8 @@ async def post_master_report(
         where_sql,
         final_params,
     )
-    for chunk in split_discord_text(text):
-        await ctx.send(chunk)
+    for embed in make_report_embeds(text, heading=f"{capper_name}  /  PERFORMANCE REPORT"):
+        await ctx.send(embed=embed)
 
 
 # =====================
@@ -1826,18 +2004,24 @@ def capper_aliases() -> Dict[str, str]:
 
     aliases.setdefault("pk", "PropKitchen")
     aliases.setdefault("propkitchen", "PropKitchen")
+    aliases.setdefault("matt", "mattlocks")
+    aliases.setdefault("mattlocks", "mattlocks")
+    aliases.setdefault("mike", "mikelocks")
+    aliases.setdefault("mikelocks", "mikelocks")
     aliases.setdefault("bray", "betsbybray")
     aliases.setdefault("clip", "clipset")
     aliases.setdefault("clipset", "clipset")
     aliases.setdefault("daijon", "DaijonBets")
     aliases.setdefault("daijonbets", "DaijonBets")
+    aliases.setdefault("stevie", "pxs")
+    aliases.setdefault("picksxstevie", "pxs")
     aliases.setdefault("sgt", "sgtprops")
     return aliases
 
 
 def capper_by_user_id(user_id: int) -> Optional[Capper]:
     for capper in TRACKED_CHANNELS.values():
-        if capper.user_id == int(user_id):
+        if capper.user_id == int(user_id) and capper.name.lower() not in INACTIVE_CAPPER_NAMES:
             return capper
     return None
 
@@ -1900,28 +2084,22 @@ def resolve_wager_category_from_tokens(tokens: List[str]) -> Tuple[Optional[str]
 def resolve_optional_filters(
     tokens: List[str],
 ) -> Tuple[Optional[str], Optional[str], List[str]]:
-    """Resolve one optional sport and one optional wager-category token in either order."""
-    remaining = list(tokens)
+    """Find one sport/category anywhere; preserve remaining date words."""
+    remaining = []
     sport: Optional[str] = None
     category: Optional[str] = None
-
-    for _ in range(2):
-        changed = False
+    for token in tokens:
         if sport is None:
-            candidate, rest = resolve_sport_from_tokens(remaining)
-            if candidate:
+            candidate, rest = resolve_sport_from_tokens([token])
+            if candidate and not rest:
                 sport = candidate
-                remaining = rest
-                changed = True
+                continue
         if category is None:
-            candidate, rest = resolve_wager_category_from_tokens(remaining)
-            if candidate:
+            candidate, rest = resolve_wager_category_from_tokens([token])
+            if candidate and not rest:
                 category = candidate
-                remaining = rest
-                changed = True
-        if not changed:
-            break
-
+                continue
+        remaining.append(token)
     return sport, category, remaining
 
 
@@ -1939,7 +2117,7 @@ def local_month_bounds(year: int, month: int) -> Tuple[datetime, datetime]:
     return start, end
 
 
-def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Optional[datetime], Optional[str]]:
+def parse_time_filter(raw: str, sport: Optional[str] = None) -> Tuple[Optional[str], Optional[datetime], Optional[datetime], Optional[str]]:
     text = normalize_space(raw).lower().replace("_", "-")
 
     if not text or text in {"all", "alltime", "all-time", "lifetime"}:
@@ -1974,7 +2152,44 @@ def parse_time_filter(raw: str) -> Tuple[Optional[str], Optional[datetime], Opti
         start, end = period_bounds_local("monthly", ref)
         return f"Last Month ({start.year}-{start.month:02d})", start, end, None
 
-    range_tokens = text.replace("→", " ").replace(" through ", " ").replace(" to ", " ").split()
+    # Sports seasons need an explicitly verified opening date. Never guess one.
+    season_match = re.fullmatch(r"(?:season\s+)?(20\d{2})(?:-\d{2,4})?\s*(?:season)?", text)
+    if season_match and "season" in text:
+        year = int(season_match.group(1))
+        starts = {("NBA", 2026): date(2026, 10, 20)}
+        opening = starts.get(((sport or "").upper(), year))
+        if opening is None:
+            return None, None, None, (
+                "Unknown sport/season. Try `bt!capper PropKitchen NBA 2026 season`."
+            )
+        start, _unused = local_day_bounds(opening)
+        _unused, end = local_day_bounds(today)
+        return f"{sport.upper()} {year}-{str(year+1)[-2:]} Season", start, end, None
+
+    relative = re.fullmatch(r"(?:last|past)\s+(\d{1,3})\s*(?:days?|d)", text)
+    if relative:
+        count = int(relative.group(1))
+        if not 1 <= count <= 365:
+            return None, None, None, "Choose between 1 and 365 days."
+        start, _unused = local_day_bounds(today - timedelta(days=count - 1))
+        _unused, end = local_day_bounds(today)
+        return f"Last {count} days", start, end, None
+
+    named_month = re.fullmatch(r"([a-z]+)\s+(20\d{2})", text)
+    if named_month and named_month.group(1) in MONTH_NAMES:
+        year = int(named_month.group(2))
+        month = MONTH_NAMES[named_month.group(1)]
+        start, end = local_month_bounds(year, month)
+        return f"Month: {year}-{month:02d}", start, end, None
+
+    slash_month = re.fullmatch(r"(\d{1,2})/(20\d{2})", text)
+    if slash_month and 1 <= int(slash_month.group(1)) <= 12:
+        month, year = int(slash_month.group(1)), int(slash_month.group(2))
+        start, end = local_month_bounds(year, month)
+        return f"Month: {year}-{month:02d}", start, end, None
+
+    range_text = re.sub(r"\s+(?:through|to|[-–])\s+|\s*→\s*", " ", text)
+    range_tokens = range_text.split()
     if len(range_tokens) == 2:
         range_start = parse_date_yyyy_mm_dd(range_tokens[0])
         range_end = parse_date_yyyy_mm_dd(range_tokens[1])
@@ -2048,11 +2263,16 @@ async def post_query_summary(
     sport_name: Optional[str] = None,
     wager_category: Optional[str] = None,
     filter_label: Optional[str] = None,
+    page: int = 1,
 ) -> None:
-    label, start_local, end_local, error = parse_time_filter(time_text)
+    label, start_local, end_local, error = parse_time_filter(time_text, sport=sport_name)
     if error:
         await ctx.send(error)
         return
+
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_local, end_local)
     where_sql, final_params = build_where(where_parts, params)
     title = base_title if not label or label == "All-Time" else f"{base_title} — {label}"
@@ -2066,6 +2286,7 @@ async def post_query_summary(
         sport_name=sport_name,
         wager_category=wager_category,
         filter_label=filter_label,
+        page=page,
     )
 
 
@@ -2077,13 +2298,16 @@ async def post_leaderboard_query(
     wager_category: Optional[str] = None,
     include_chart: bool = False,
 ) -> None:
-    label, start_local, end_local, error = parse_time_filter(time_text)
+    label, start_local, end_local, error = parse_time_filter(time_text, sport=sport_name)
     if error:
         await ctx.send(error)
         return
 
     where_parts: List[str] = []
     params: List[object] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     if sport_name:
         where_parts.append("UPPER(sport) = ?")
         params.append(sport_name.upper())
@@ -2123,7 +2347,7 @@ def split_name_and_time_filter(query: str) -> Tuple[str, str]:
     if not tokens:
         return "", ""
 
-    for suffix_len in range(min(3, len(tokens)), 0, -1):
+    for suffix_len in range(min(5, len(tokens)), 0, -1):
         candidate = " ".join(tokens[-suffix_len:])
         label, _start, _end, error = parse_time_filter(candidate)
         if error is None and label != "All-Time":
@@ -2168,23 +2392,20 @@ def is_bot_command_message(message: discord.Message) -> bool:
 
 
 def looks_like_wager_message(message: discord.Message, content: str) -> bool:
-    if is_bot_command_message(message):
-        return False
-    if RE_UNITS.search(content) or parse_odds_text(content):
+    if is_bot_command_message(message) or getattr(message, "reference", None) is not None:
+        return False  # Replies and commands are not candidates for missing-units warnings.
+    if RE_UNITS.search(content):
         return True
     upper = f" {content.upper()} "
     betting_signals = (
-        " OVER ", " UNDER ", " PARLAY", " SGP ", " DFS ", " ODDS",
+        " OVER ", " UNDER ", " PARLAY", " SGP ", " DFS ",
         " MONEYLINE", " SPREAD", " STRIKEOUT", " REBOUND", " ASSIST",
         " POINTS", " TOTAL BASE", " HITS ALLOWED", " PRA ", " MORE ", " LESS ",
     )
-    if any(signal in upper for signal in betting_signals):
-        return True
-    if infer_platform(content)[0]:
-        return True
-    # Screenshot-only bets should be warned in betting channels, but not in the
-    # Giveaways channel where normal promotional images may not be wagers.
-    return bool(message.attachments) and int(message.channel.id) != 1306857603598520352
+    # Odds alone, mentions of a sportsbook, or an unrelated image are not
+    # sufficient evidence that this is a malformed wager.
+    has_bet_context = any(signal in upper for signal in betting_signals) or bool(infer_platform(content)[0])
+    return has_bet_context and bool(parse_odds_text(content))
 
 
 def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str]:
@@ -2208,12 +2429,12 @@ def format_warnings_for_tracked_post(content: str, created_utc: str) -> List[str
         warnings.append("sport is missing or unrecognized")
     if description == "Bet details unavailable":
         warnings.append("wager details are too vague")
-    if not parse_bet_date(content, created_utc):
-        warnings.append("written bet date is missing; the grading date will be used")
     return warnings
 
 
 async def warn_about_tracked_format(message: discord.Message, content: str) -> None:
+    if getattr(message, "reference", None) is not None:
+        return  # Do not clutter reply threads with automatic format feedback.
     warnings = format_warnings_for_tracked_post(content, utc_iso(message.created_at))
     if not warnings:
         return
@@ -2246,6 +2467,10 @@ def resolve_capper_for_message(message: discord.Message) -> Optional[Capper]:
     if not is_trackable_channel(message.channel.id):
         return None
 
+    channel_capper = TRACKED_CHANNELS.get(int(message.channel.id))
+    if channel_capper and channel_capper.name.lower() in INACTIVE_CAPPER_NAMES:
+        return None  # Pause new posts in inactive capper dedicated channels.
+
     direct_capper = capper_by_user_id(message.author.id)
     if direct_capper:
         return direct_capper
@@ -2258,6 +2483,7 @@ def resolve_capper_for_message(message: discord.Message) -> Optional[Capper]:
 
 def find_duplicate_message_id(
     message_id: int,
+    guild_id: int,
     capper_name: str,
     duplicate_key: str,
     created_utc: str,
@@ -2280,7 +2506,8 @@ def find_duplicate_message_id(
             f"""
             SELECT message_id
             FROM {table}
-            WHERE LOWER(capper) = ?
+            WHERE guild_id = ?
+              AND LOWER(capper) = ?
               AND duplicate_key = ?
               AND created_utc >= ?
               AND created_utc <= ?
@@ -2288,7 +2515,7 @@ def find_duplicate_message_id(
             ORDER BY created_utc DESC
             LIMIT 1
             """,
-            (capper_name.lower(), duplicate_key, cutoff, upper, int(message_id)),
+            (int(guild_id), capper_name.lower(), duplicate_key, cutoff, upper, int(message_id)),
         ).fetchone()
         if row:
             return int(row[0])
@@ -2297,6 +2524,7 @@ def find_duplicate_message_id(
 
 def insert_pending(
     message_id: int,
+    guild_id: int,
     channel_id: int,
     capper: Capper,
     author_user_id: int,
@@ -2310,10 +2538,13 @@ def insert_pending(
 
     odds_text = parse_odds_text(content)
     fields = parse_analytics_fields(content, odds_text)
-    bet_date = parse_bet_date(content, created_utc)
+    # When no future/event date is supplied, assume the posting day in ET.
+    # Cappers posting advance picks should explicitly include the game date.
+    bet_date = parse_bet_date(content, created_utc) or local_date_from_utc_iso(created_utc).isoformat()
     duplicate_key = build_duplicate_key(content, created_utc, capper.name, risk, odds_text, fields)
     duplicate_message_id = find_duplicate_message_id(
         message_id,
+        guild_id,
         capper.name,
         duplicate_key,
         created_utc,
@@ -2325,16 +2556,17 @@ def insert_pending(
         """
         INSERT OR REPLACE INTO pending
         (
-            message_id, channel_id, capper, capper_user_id, author_user_id,
+            message_id, guild_id, channel_id, capper, capper_user_id, author_user_id,
             content, created_utc, bet_date, sport, risk_units, odds_text, jump_url,
             league, event, player, team, opponent, bet_type, market, line,
             sportsbook, odds_format, multiplier, wager_category, platform,
             platform_type, duplicate_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
+            int(guild_id),
             int(channel_id),
             capper.name,
             int(capper.user_id),
@@ -2379,13 +2611,13 @@ def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bo
     odds_text = parse_odds_text(content)
     fields = parse_analytics_fields(content, odds_text)
     created_utc = utc_iso(message.created_at)
-    bet_date = parse_bet_date(content, created_utc)
+    bet_date = parse_bet_date(content, created_utc) or local_date_from_utc_iso(created_utc).isoformat()
     duplicate_key = build_duplicate_key(content, created_utc, capper.name, risk, odds_text, fields)
 
     cur.execute(
         """
         UPDATE pending
-        SET capper = ?, capper_user_id = ?, author_user_id = ?, content = ?,
+        SET guild_id = ?, capper = ?, capper_user_id = ?, author_user_id = ?, content = ?,
             bet_date = ?, sport = ?, risk_units = ?, odds_text = ?, jump_url = ?,
             league = ?, event = ?, player = ?, team = ?, opponent = ?, bet_type = ?,
             market = ?, line = ?, sportsbook = ?, odds_format = ?, multiplier = ?,
@@ -2393,6 +2625,7 @@ def refresh_pending_from_message(message: discord.Message, capper: Capper) -> bo
         WHERE message_id = ?
         """,
         (
+            int(message.guild.id if message.guild else 0),
             capper.name,
             int(capper.user_id),
             int(message.author.id),
@@ -2450,7 +2683,7 @@ def grade_pending(
     row = cur.execute(
         """
         SELECT
-            channel_id, capper, capper_user_id, author_user_id, content, sport,
+            guild_id, channel_id, capper, capper_user_id, author_user_id, content, sport,
             risk_units, odds_text, created_utc, bet_date, jump_url, league, event,
             player, team, opponent, bet_type, market, line, sportsbook, odds_format,
             multiplier, wager_category, platform, platform_type, duplicate_key
@@ -2463,6 +2696,7 @@ def grade_pending(
         return False
 
     (
+        guild_id,
         channel_id,
         capper_name,
         capper_user_id,
@@ -2522,17 +2756,18 @@ def grade_pending(
         """
         INSERT OR REPLACE INTO bets
         (
-            message_id, channel_id, capper, capper_user_id, author_user_id, sport,
+    message_id, guild_id, channel_id, capper, capper_user_id, author_user_id, sport,
             risk_units, net_units, result, odds_text, created_utc, graded_utc,
             bet_date, content, jump_url, league, event, player, team, opponent,
             bet_type, market, line, sportsbook, odds_format, multiplier,
             wager_category, platform, platform_type, duplicate_key, grade_reaction,
             grader_user_id, admin_override
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
+            int(guild_id),
             int(channel_id),
             str(capper_name),
             int(capper_user_id),
@@ -2627,7 +2862,7 @@ def ungrade_bet(message_id: int) -> bool:
             channel_id, capper, capper_user_id, author_user_id, content, sport,
             risk_units, odds_text, created_utc, bet_date, jump_url, league, event,
             player, team, opponent, bet_type, market, line, sportsbook, odds_format,
-            multiplier, wager_category, platform, platform_type, duplicate_key
+            multiplier, wager_category, platform, platform_type, duplicate_key, guild_id
         FROM bets
         WHERE message_id = ?
         """,
@@ -2645,9 +2880,9 @@ def ungrade_bet(message_id: int) -> bool:
             content, created_utc, bet_date, sport, risk_units, odds_text, jump_url,
             league, event, player, team, opponent, bet_type, market, line,
             sportsbook, odds_format, multiplier, wager_category, platform,
-            platform_type, duplicate_key
+            platform_type, duplicate_key, guild_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(message_id),
@@ -2677,6 +2912,7 @@ def ungrade_bet(message_id: int) -> bool:
             str(row[23] or ""),
             str(row[24] or ""),
             str(row[25] or ""),
+            int(row[26]),
         ),
     )
     conn.commit()
@@ -2710,6 +2946,12 @@ async def find_remaining_authorized_grade(
 # =====================
 # EVENTS
 # =====================
+
+@bot.check
+async def require_server_context(ctx: commands.Context) -> bool:
+    # Reports and exports must never query all servers from a direct message.
+    return ctx.guild is not None
+
 
 @bot.event
 async def on_ready() -> None:
@@ -2758,6 +3000,7 @@ async def on_message(message: discord.Message) -> None:
 
     inserted, duplicate_message_id = insert_pending(
         message.id,
+        message.guild.id if message.guild else 0,
         message.channel.id,
         capper,
         message.author.id,
@@ -2767,9 +3010,12 @@ async def on_message(message: discord.Message) -> None:
     )
     if inserted:
         reaction_added = await safe_add_reaction(message, PENDING_REACTION)
-        # Keep automatic chat messages limited to wager-format problems. Permission issues
-        # are diagnosed on demand with `bt!trackcheck` instead of posting channel clutter.
-        _ = reaction_added
+        if not reaction_added:
+            await send_temporary_notice(
+                message,
+                "⚠️ **The bet was saved, but I could not add 📝.**\n"
+                "Give BetTracker the **Add Reactions** and **Read Message History** permissions in this channel.",
+            )
         await warn_about_tracked_format(message, content)
     elif duplicate_message_id is not None:
         await safe_add_reaction(message, DUPLICATE_REACTION)
@@ -2780,13 +3026,9 @@ async def on_message(message: discord.Message) -> None:
 async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
     if bot.user and after.author.id == bot.user.id:
         return
-
-    # Discord can emit message-update events for embed/link-preview changes even when the
-    # capper did not edit the wager text. Ignore those so reactions or background embed
-    # updates never trigger automatic "bet not tracked" / format notices.
+    # Ignore Discord embed/link-preview updates with unchanged wager text.
     if message_to_text(before) == message_to_text(after):
         return
-
     if is_bot_command_message(after):
         return
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
@@ -2798,17 +3040,16 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
 
     content = message_to_text(after)
     if pending_exists(after.id):
-        # Edits refresh silently. Automatic notices are reserved for newly posted
-        # malformed wagers so routine corrections/backlogs do not clutter channels.
         refresh_pending_from_message(after, capper)
         return
 
-    # A capper can correct a duplicate-flagged or incomplete post by editing it.
+    # Corrected edits remain silent. Tracking happens only when units are supplied.
     if parse_risk_units(content) is None:
         return
 
     inserted, duplicate_message_id = insert_pending(
         after.id,
+        after.guild.id if after.guild else 0,
         after.channel.id,
         capper,
         after.author.id,
@@ -2818,15 +3059,16 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     )
     if inserted:
         await safe_clear_reaction(after, DUPLICATE_REACTION)
-        reaction_added = await safe_add_reaction(after, PENDING_REACTION)
-        # Edits/backlogs should stay quiet. If 📝 cannot be added, `bt!trackcheck`
-        # can diagnose channel permissions without creating automatic chatter.
-        _ = reaction_added
+        await safe_add_reaction(after, PENDING_REACTION)
     elif duplicate_message_id is not None:
         await safe_add_reaction(after, DUPLICATE_REACTION)
 
 @bot.event
 async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
+    # on_message_edit handles cached messages. Avoid processing the same
+    # update twice and sending duplicate warning replies.
+    if getattr(payload, "cached_message", None) is not None:
+        return
     if not is_trackable_channel(payload.channel_id) or bet_exists(payload.message_id):
         return
 
@@ -2847,16 +3089,16 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
 
     content = message_to_text(message)
     if pending_exists(payload.message_id):
-        # Refresh silently. Automatic format notices are reserved for newly posted wagers,
-        # not raw/background Discord update events.
         refresh_pending_from_message(message, capper)
         return
 
+    # Avoid chat spam for raw/background Discord edit events.
     if parse_risk_units(content) is None:
         return
 
     inserted, duplicate_message_id = insert_pending(
         message.id,
+        message.guild.id if message.guild else 0,
         message.channel.id,
         capper,
         message.author.id,
@@ -2866,10 +3108,7 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
     )
     if inserted:
         await safe_clear_reaction(message, DUPLICATE_REACTION)
-        reaction_added = await safe_add_reaction(message, PENDING_REACTION)
-        # Do not post automatic format/permission chatter from raw message-update events.
-        # The wager is still saved; `bt!trackcheck` can diagnose reaction permissions.
-        _ = reaction_added
+        await safe_add_reaction(message, PENDING_REACTION)
     elif duplicate_message_id is not None:
         await safe_add_reaction(message, DUPLICATE_REACTION)
 
@@ -3069,10 +3308,10 @@ async def commands_cmd(ctx: commands.Context) -> None:
         "**Posting Help**\n"
         "`bt!format straight` | `bt!format parlay` | `bt!format dfs`\n"
         "Grades: ✅ win | ❌ loss | ➖ push | ↩️ void/refund\n"
-        "`bt!trackcheck`\n\n"
+        "`bt!trackcheck` | `bt!pending` | `bt!pending all` | `bt!pending gr8`\n\n"
         "**Admin**\n"
         "Reply: `bt!setdate`, `bt!setodds`, `bt!setunits`, `bt!setsport`\n"
-        "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`\n"
+        "Reply: `bt!settype`, `bt!setplatform`, `bt!setmarket`, `bt!setpayout 2x`\n"
         "`bt!force_sport NBA WNBA 2026-07-01 2026-07-31`\n"
         "`bt!backup` | `bt!export july` | `bt!export PropKitchen july`"
     )
@@ -3117,38 +3356,114 @@ async def date_cmd(ctx: commands.Context, date_arg: str) -> None:
     await post_leaderboard_query(ctx, date_arg)
 
 
-@bot.command(name="pending")
-async def pending_cmd(ctx: commands.Context) -> None:
-    rows = cur.execute(
+@bot.command(name="monthlyroles", aliases=["setmonthlyroles", "recaproles"])
+@commands.has_permissions(manage_guild=True)
+async def monthlyroles_cmd(ctx: commands.Context, role_one: discord.Role, role_two: discord.Role) -> None:
+    """Configure exactly two server roles to tag in the monthly recap."""
+    if (ctx.guild is None or role_one.guild.id != ctx.guild.id
+            or role_two.guild.id != ctx.guild.id or role_one.is_default()
+            or role_two.is_default() or role_one.id == role_two.id):
+        await ctx.send("Mention two different VIP roles from this Discord server.")
+        return
+    cur.execute(
         """
-        SELECT capper, COUNT(*)
-        FROM pending
-        GROUP BY capper
-        ORDER BY COUNT(*) DESC
-        """
-    ).fetchall()
+        INSERT INTO recap_settings (guild_id, monthly_role_ids) VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET monthly_role_ids = excluded.monthly_role_ids
+        """,
+        (int(ctx.guild.id), f"{int(role_one.id)},{int(role_two.id)}"),
+    )
+    conn.commit()
+    await ctx.send(f"✅ The monthly recap will tag {role_one.name} and {role_two.name} on the 3rd of each month.")
 
-    total = sum(int(count or 0) for _, count in rows)
-    if not rows:
-        await ctx.send("📝 **Pending Bets:** 0")
+
+@bot.command(name="pending", aliases=["ungraded", "openbets", "unsettled"])
+async def pending_cmd(ctx: commands.Context, *, query: str = "") -> None:
+    """Find ungraded wagers with direct links to react on the original post."""
+    if ctx.guild is None:
+        await ctx.send("Run this inside the Discord server.")
         return
 
-    lines = [f"📝 **Pending Bets:** {total}"]
-    for capper_name, count in rows:
-        lines.append(f"**{capper_name}**: {int(count)}")
-    await ctx.send("\n".join(lines))
+    tokens = split_args(query)
+    page = 1
+    if tokens and tokens[-1].isdigit():
+        page = int(tokens.pop())
+    if not 1 <= page <= 100:
+        await ctx.send("Use a page number from 1 to 100.")
+        return
+
+    filter_text = " ".join(tokens).strip()
+    capper_name: Optional[str] = None
+    if filter_text.lower() not in {"all", "everyone", "team"}:
+        if filter_text:
+            capper_name, extra = resolve_capper_from_tokens(tokens)
+            if capper_name is None or extra:
+                await ctx.send("Use `bt!pending`, `bt!pending all`, `bt!pending gr8`, or `bt!pending all 2`.")
+                return
+        else:
+            registered = capper_by_user_id(ctx.author.id)
+            if registered is not None:
+                capper_name = registered.name
+
+    where_sql = "guild_id = ?"
+    params: List[object] = [int(ctx.guild.id)]
+    if capper_name:
+        where_sql += " AND LOWER(capper) = ?"
+        params.append(capper_name.lower())
+
+    count = int(cur.execute(
+        f"SELECT COUNT(*) FROM pending WHERE {where_sql}", tuple(params)
+    ).fetchone()[0])
+    rows = cur.execute(
+        f"""
+        SELECT capper, risk_units, content, market, jump_url, channel_id, message_id
+        FROM pending
+        WHERE {where_sql}
+        ORDER BY created_utc DESC, message_id DESC
+        LIMIT 20 OFFSET ?
+        """,
+        (*params, (page - 1) * 20),
+    ).fetchall()
+
+    label = capper_name or "All Cappers"
+    if count == 0:
+        await ctx.send(f"📝 **Ungraded Bets — {label}: 0**")
+        return
+    if not rows:
+        await ctx.send(f"No bets on page {page}. There are {count} ungraded bets.")
+        return
+
+    lines = [f"📝 **Ungraded Bets — {label}** | {count} pending | Page {page}"]
+    for name, risk, content, market, jump_url, channel_id, message_id in rows:
+        desc = compact_bet_description(str(content or ""), str(market or ""), max_len=82)
+        url = str(jump_url or "").strip()
+        if not url.startswith("https://discord.com/channels/"):
+            url = f"https://discord.com/channels/{int(ctx.guild.id)}/{int(channel_id)}/{int(message_id)}"
+        capper_label = f"**{name}** | " if not capper_name else ""
+        lines.append(f"• {capper_label}{format_compact_units(float(risk))} | {desc} | [jump]({url})")
+    if page * 20 < count:
+        suffix = (capper_name or "all") + f" {page + 1}"
+        lines.append(f"Next page: `bt!pending {suffix}`")
+    for chunk in split_discord_text("\n".join(lines)):
+        await ctx.send(chunk)
 
 
 async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tuple[object, ...], label: str) -> None:
-    # Keep this command fast even when hundreds of stale pending rows exist.
-    # We only collect a small set of the newest messages for cosmetic reaction cleanup.
+    if ctx.guild is None:
+        await ctx.send("Run this command inside a Discord server.")
+        return
+
+    # Always restrict bulk deletion to the invoking Discord server.
+    scoped_where_sql = f"guild_id = ? AND ({where_sql})"
+    scoped_params = (int(ctx.guild.id), *params)
+
+    # Large backlogs should not require hundreds of Discord API fetches
+    # before the database rows are deleted.
     count_row = cur.execute(
-        f"SELECT COUNT(*) FROM pending WHERE {where_sql}",
-        params,
+        f"SELECT COUNT(*) FROM pending WHERE {scoped_where_sql}",
+        scoped_params,
     ).fetchone()
     pending_count = int(count_row[0] or 0) if count_row else 0
-
-    if pending_count == 0:
+    if not pending_count:
         await ctx.send(f"📝 No pending bets found for **{label}**.")
         return
 
@@ -3156,16 +3471,14 @@ async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tupl
         f"""
         SELECT message_id, channel_id
         FROM pending
-        WHERE {where_sql}
+        WHERE {scoped_where_sql}
         ORDER BY created_utc DESC
         LIMIT 50
         """,
-        params,
+        scoped_params,
     ).fetchall()
 
-    # Database cleanup happens first so the command responds immediately and the
-    # cleared bets stop counting as pending right away. Graded history is untouched.
-    cur.execute(f"DELETE FROM pending WHERE {where_sql}", params)
+    cur.execute(f"DELETE FROM pending WHERE {scoped_where_sql}", scoped_params)
     conn.commit()
 
     await ctx.send(
@@ -3175,8 +3488,8 @@ async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tupl
         "Cleaning 📝 reactions from up to the 50 most recent cleared messages where possible."
     )
 
-    # Best-effort cosmetic cleanup only. Old 📝 reactions may remain on historical
-    # Discord messages, but those messages are no longer pending in BetTracker.
+    # Best-effort cosmetic cleanup. Older 📝 reactions may remain in Discord,
+    # but those wagers are no longer pending in the database.
     for message_id, channel_id in recent_rows:
         channel = bot.get_channel(int(channel_id))
         if channel is None:
@@ -3252,7 +3565,9 @@ async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, content, risk_units, odds_text, result, net_units
         FROM bets
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for bet_id, content, old_risk, odds_text, result, old_net in bet_rows:
@@ -3280,7 +3595,9 @@ async def fix_decimal_units_cmd(ctx: commands.Context) -> None:
         """
         SELECT message_id, content, risk_units
         FROM pending
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for message_id, content, old_risk in pending_rows:
@@ -3324,7 +3641,9 @@ async def fix_bet_dates_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, content, created_utc, graded_utc, bet_date
         FROM bets
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for bet_id, content, created_utc, graded_utc, old_bet_date in bet_rows:
@@ -3347,7 +3666,9 @@ async def fix_bet_dates_cmd(ctx: commands.Context) -> None:
         """
         SELECT message_id, content, created_utc, bet_date
         FROM pending
-        """
+        WHERE guild_id = ?
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     for message_id, content, created_utc, old_bet_date in pending_rows:
@@ -3375,8 +3696,9 @@ async def recalc_multipliers_cmd(ctx: commands.Context) -> None:
         """
         SELECT id, risk_units, odds_text, net_units
         FROM bets
-        WHERE result = 'win' AND LOWER(odds_text) LIKE '%x%'
-        """
+        WHERE guild_id = ? AND result = 'win' AND LOWER(odds_text) LIKE '%x%'
+        """,
+        (int(ctx.guild.id),),
     ).fetchall()
 
     checked = 0
@@ -3427,9 +3749,10 @@ async def backfill_wager_types_cmd(
         """
         SELECT id, capper, content, created_utc, risk_units, odds_text, sport, league, market
         FROM bets
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for bet_id, capper_name, content, created_utc, risk, odds_text, old_sport, old_league, old_market in bet_rows:
@@ -3485,9 +3808,10 @@ async def backfill_wager_types_cmd(
         """
         SELECT message_id, capper, content, created_utc, risk_units, odds_text, sport, league, market
         FROM pending
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for message_id, capper_name, content, created_utc, risk, odds_text, old_sport, old_league, old_market in pending_rows:
@@ -3570,9 +3894,10 @@ async def fix_sports_cmd(
         """
         SELECT id, content, market, odds_text, sport, league
         FROM bets
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for bet_id, content, market, odds_text, old_sport, old_league in bet_rows:
@@ -3612,9 +3937,10 @@ async def fix_sports_cmd(
         """
         SELECT message_id, content, market, odds_text, sport, league
         FROM pending
-        WHERE COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
+        WHERE guild_id = ?
+          AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) >= ?
         """,
-        (cutoff,),
+        (int(ctx.guild.id), cutoff),
     ).fetchall()
 
     for message_id, content, market, odds_text, old_sport, old_league in pending_rows:
@@ -3662,11 +3988,11 @@ async def backfill_content_cmd(ctx: commands.Context, limit: int = 200) -> None:
         """
         SELECT id, message_id, channel_id, capper, created_utc, risk_units, result, net_units
         FROM bets
-        WHERE content = '' OR content IS NULL
+        WHERE guild_id = ? AND (content = '' OR content IS NULL)
         ORDER BY created_utc DESC
         LIMIT ?
         """,
-        (limit,),
+        (int(ctx.guild.id), limit),
     ).fetchall()
 
     updated = checked = corrected_units = 0
@@ -3831,10 +4157,22 @@ def default_league_for_manual_sport(new_sport: str, old_league: str, old_sport: 
 
 
 def referenced_message_id(ctx: commands.Context) -> Optional[int]:
+    """Resolve a replied-to tracked message only within this Discord server."""
     reference = ctx.message.reference
-    if not reference or not reference.message_id:
+    if ctx.guild is None or not reference or not reference.message_id:
         return None
-    return int(reference.message_id)
+    message_id = int(reference.message_id)
+    guild_id = int(ctx.guild.id)
+    row = cur.execute(
+        """
+        SELECT 1 FROM pending WHERE message_id = ? AND guild_id = ?
+        UNION ALL
+        SELECT 1 FROM bets WHERE message_id = ? AND guild_id = ?
+        LIMIT 1
+        """,
+        (message_id, guild_id, message_id, guild_id),
+    ).fetchone()
+    return message_id if row else None
 
 
 @bot.command(name="setdate", aliases=["set_bet_date", "fixdate"])
@@ -3969,6 +4307,67 @@ async def setodds_cmd(ctx: commands.Context, *, odds_arg: str) -> None:
         f"✅ Graded bet odds updated to **{odds_text}**.\n"
         f"Net units corrected from **{float(old_net):+.2f}u** to **{new_net:+.2f}u**.\n"
         f"Wager type: **{wager_category_label(str(fields['wager_category']))}**."
+    )
+
+
+@bot.command(name="setpayout", aliases=["flexpayout", "paidmultiplier"])
+async def setpayout_cmd(ctx: commands.Context, multiplier_text: str, message_ref: str = "") -> None:
+    """Correct a settled slip's actual total payout multiplier (e.g. 25x paid 2x)."""
+    if ctx.guild is None:
+        await ctx.send("Use this command inside the Discord server.")
+        return
+    message_id = referenced_message_id(ctx)
+    if message_id is None and message_ref:
+        match = re.fullmatch(
+            r"(?:https://(?:discord\.com|discordapp\.com)/channels/(\d+)/(\d+)/(\d+)|([0-9]{15,20}))",
+            message_ref.strip(),
+        )
+        if match:
+            if match.group(1) and int(match.group(1)) != int(ctx.guild.id):
+                await ctx.send("That bet link belongs to a different Discord server.")
+                return
+            message_id = int(match.group(3) or match.group(4))
+    if message_id is None:
+        await ctx.send("Reply to the graded slip with `bt!setpayout 2x`, or use `bt!setpayout 2x <Discord message link>`.")
+        return
+    multiplier_text = parse_manual_odds_text(multiplier_text)
+    mult = parse_multiplier_value(multiplier_text)
+    if mult is None or mult <= 1:
+        await ctx.send("Enter the actual total payout multiplier, e.g. `bt!setpayout 2x`.")
+        return
+    row = cur.execute(
+        """
+        SELECT risk_units, result, odds_text, net_units, capper_user_id
+        FROM bets WHERE message_id = ? AND guild_id = ?
+        """, (int(message_id), int(ctx.guild.id)),
+    ).fetchone()
+    if not row:
+        await ctx.send("Graded bet not found in this server. Grade the slip first.")
+        return
+    risk, result, old_odds, old_net, owner_user_id = row
+    can_correct = (int(ctx.author.id) in {int(owner_user_id), int(ADMIN_USER_ID)}
+                   or bool(ctx.author.guild_permissions.manage_guild))
+    if not can_correct:
+        await ctx.send("Only the original capper or a server manager can correct this payout.")
+        return
+    if str(result) != "win":
+        await ctx.send("This command is for a graded slip that paid out. Use grading reactions for losses/voids.")
+        return
+    new_net = compute_net_units(float(risk), multiplier_text, "win")
+    cur.execute(
+        """
+        UPDATE bets SET odds_text = ?, odds_format = 'multiplier', multiplier = ?, net_units = ?
+        WHERE message_id = ? AND guild_id = ?
+        """, (multiplier_text, float(mult), float(new_net), int(message_id), int(ctx.guild.id)),
+    )
+    log_correction(message_id, "bets", "settled_payout_multiplier",
+                   str(old_odds or ""), multiplier_text, ctx.author.id,
+                   "Actual flex/void-adjusted payout; original post retained")
+    conn.commit()
+    await ctx.send(
+        f"✅ **Actual payout recorded: {multiplier_text}**\n"
+        f"Risk: **{float(risk):g}u** | Net: **{new_net:+.2f}u** "
+        f"(previously {float(old_net):+.2f}u). Original message unchanged."
     )
 
 
@@ -4202,19 +4601,19 @@ async def force_sport_cmd(
         """
         SELECT message_id, sport, league
         FROM bets
-        WHERE UPPER(sport) = ?
+        WHERE guild_id = ? AND UPPER(sport) = ?
           AND COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10), substr(created_utc, 1, 10)) BETWEEN ? AND ?
         """,
-        (old_sport, start_iso, end_iso),
+        (int(ctx.guild.id), old_sport, start_iso, end_iso),
     ).fetchall()
     pending_rows = cur.execute(
         """
         SELECT message_id, sport, league
         FROM pending
-        WHERE UPPER(sport) = ?
+        WHERE guild_id = ? AND UPPER(sport) = ?
           AND COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) BETWEEN ? AND ?
         """,
-        (old_sport, start_iso, end_iso),
+        (int(ctx.guild.id), old_sport, start_iso, end_iso),
     ).fetchall()
 
     for table, rows in (("bets", bet_rows), ("pending", pending_rows)):
@@ -4238,9 +4637,76 @@ async def force_sport_cmd(
     )
 
 
+@bot.command(name="migrateguild", aliases=["previewguildmigration"])
+@commands.has_permissions(manage_guild=True)
+async def migrateguild_cmd(ctx: commands.Context, mode: str = "preview") -> None:
+    """Owner-only preview/confirm repair of legacy guild_id=0 rows."""
+    if ctx.guild is None or int(ctx.author.id) != int(ADMIN_USER_ID):
+        await ctx.send("Only the BetTracker platform owner may migrate historical records.")
+        return
+    mode = mode.lower().strip()
+    if mode not in {"preview", "confirm"}:
+        await ctx.send("Use `bt!migrateguild preview` or `bt!migrateguild CONFIRM`.")
+        return
+
+    # Prove that a legacy row belongs to this guild using a valid Discord
+    # jump URL, or a configured tracker channel actually found in this guild.
+    registered_ids = set(TRACKED_CHANNELS) | set(SHARED_TRACKING_CHANNEL_IDS)
+    valid_channels = sorted(
+        channel_id for channel_id in registered_ids
+        if ctx.guild.get_channel(channel_id) is not None
+    )
+    filters = ["jump_url LIKE ?"]
+    values: List[object] = [f"https://discord.com/channels/{int(ctx.guild.id)}/%"]
+    if valid_channels:
+        filters.append("channel_id IN (" + ",".join("?" for _ in valid_channels) + ")")
+        values.extend(valid_channels)
+    match_sql = "(" + " OR ".join(filters) + ")"
+
+    counts = {}
+    for table in ("bets", "pending"):
+        counts[table] = int(cur.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE guild_id = 0 AND {match_sql}",
+            tuple(values),
+        ).fetchone()[0])
+
+    if mode == "preview":
+        await ctx.send(
+            f"🔎 **Legacy Data Migration Preview**\n"
+            f"Server: **{ctx.guild.name}** (`{ctx.guild.id}`)\n"
+            f"Historical graded bets: **{counts['bets']}**\n"
+            f"Historical pending bets: **{counts['pending']}**\n"
+            f"Verified configured channels: **{len(valid_channels)}**\n"
+            "No data changed. Back up the database first. Then run "
+            "`bt!migrateguild CONFIRM` in this same server."
+        )
+        return
+
+    if counts["bets"] + counts["pending"] == 0:
+        await ctx.send("✅ No qualifying legacy records need migration.")
+        return
+
+    changes = {}
+    for table in ("bets", "pending"):
+        changes[table] = cur.execute(
+            f"UPDATE {table} SET guild_id = ? WHERE guild_id = 0 AND {match_sql}",
+            (int(ctx.guild.id), *values),
+        ).rowcount
+    conn.commit()
+    await ctx.send(
+        f"✅ **Historical server migration completed**\n"
+        f"Graded bets: **{changes['bets']}** | Pending: **{changes['pending']}**\n"
+        "Unverified legacy records were left untouched."
+    )
+
+
 @bot.command(name="backup", aliases=["backupdb", "databasebackup"])
 @commands.has_permissions(manage_guild=True)
 async def backup_cmd(ctx: commands.Context) -> None:
+    if int(ctx.author.id) != int(ADMIN_USER_ID):
+        await ctx.send("Full database backups are restricted to the BetTracker platform owner. Use `bt!export` for server data.")
+        return
+
     timestamp = now_local().strftime("%Y%m%d_%H%M%S")
     filename = f"bettracker_backup_{timestamp}.db"
     temp_path = os.path.join("/tmp", filename)
@@ -4286,6 +4752,9 @@ async def export_cmd(ctx: commands.Context, *, query: str = "alltime") -> None:
     where_parts: List[str] = []
     params: List[object] = []
     labels: List[str] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     if capper:
         where_parts.append("LOWER(capper) = ?")
         params.append(capper.lower())
@@ -4315,6 +4784,21 @@ async def export_cmd(ctx: commands.Context, *, query: str = "alltime") -> None:
         await ctx.send("No graded bets matched that export.")
         return
     headers = [str(column[0]) for column in export_cursor.description]
+    raw_csv = str(getattr(ctx, "invoked_with", "") or "").lower() in {"exportcsv", "csv"}
+    if not raw_csv:
+        payload = io.BytesIO(export_xlsx(headers, rows, clean_period_label(label)))
+        payload.seek(0)
+        safe_parts = [normalize_key(part) or "all" for part in labels]
+        period_name = normalize_key(clean_period_label(label)) or "alltime"
+        filename = "bettracker_" + "_".join([*safe_parts, period_name]) + ".xlsx"
+        await ctx.send(
+            f"📊 **BetTracker Excel Report**\n"
+            f"Rows: **{len(rows)}** | Period: **{clean_period_label(label)}**\n"
+            "Includes Summary and Bets worksheets.",
+            file=discord.File(payload, filename=filename),
+        )
+        return
+
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(headers)
@@ -4375,8 +4859,19 @@ async def league_cmd(ctx: commands.Context, *, query: str) -> None:
 @bot.command(name="capper", aliases=["bets"])
 async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
     tokens = split_args(query)
+    page = 1
+    if len(tokens) >= 2 and normalize_key(tokens[-2]) == "page":
+        try:
+            page = int(tokens[-1])
+        except ValueError:
+            await ctx.send("Use a page number like `page 2`.")
+            return
+        tokens = tokens[:-2]
+    if not 1 <= page <= 10000:
+        await ctx.send("Choose a page between 1 and 10000.")
+        return
     wants_report = any(normalize_key(token) == "report" for token in tokens)
-    tokens = [token for token in tokens if normalize_key(token) != "report"]
+    tokens = [token for token in tokens if normalize_key(token) not in {"report", "recap", "summary"}]
 
     capper, remaining = resolve_capper_from_tokens(tokens)
     if not capper:
@@ -4392,7 +4887,7 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
 
     sport, category, remaining = resolve_optional_filters(remaining)
     remaining_text = " ".join(remaining).strip()
-    _whole_label, _whole_start, _whole_end, whole_time_error = parse_time_filter(remaining_text)
+    _whole_label, _whole_start, _whole_end, whole_time_error = parse_time_filter(remaining_text, sport=sport)
     if whole_time_error is None:
         search_text, time_text = "", remaining_text
     else:
@@ -4451,7 +4946,21 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
         sport_name=sport,
         wager_category=category,
         filter_label=filter_label,
+        page=page,
     )
+
+@bot.command(name="recap", aliases=["recaps"])
+async def recap_cmd(ctx: commands.Context, *, query: str = "") -> None:
+    tokens = split_args(query)
+    capper, _remaining = resolve_capper_from_tokens(tokens)
+    if capper is None:
+        own_capper = capper_by_user_id(ctx.author.id)
+        if own_capper is None:
+            await ctx.send("Use `bt!recap PropKitchen October 2026` or `bt!recap gr8 last 14 days`.")
+            return
+        query = f"{own_capper.name} {query}".strip()
+    await capper_cmd(ctx, query=query)
+
 
 @bot.command(name="report", aliases=["masterreport", "capperreport"])
 async def report_cmd(ctx: commands.Context, *, query: str) -> None:
@@ -4527,6 +5036,9 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
 
     where_parts: List[str] = []
     params: List[object] = []
+    if ctx.guild is not None:
+        where_parts.append("guild_id = ?")
+        params.append(int(ctx.guild.id))
     add_time_filter(where_parts, params, start_l, end_l)
     where_sql, final_params = build_where(where_parts, params)
 
@@ -4607,6 +5119,33 @@ async def data_issues_cmd(ctx: commands.Context, *, time_filter: str = "thismont
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if ctx.guild is None:
+        await ctx.send("BetTracker commands must be used inside a Discord server.")
+        return
+    if isinstance(error, commands.CommandNotFound):
+        raw = ctx.message.content[len(ctx.prefix):].strip() if ctx.prefix else ""
+        tokens = split_args(raw)
+        if tokens:
+            recognized, _rest = resolve_capper_from_tokens(tokens)
+            if recognized:
+                await ctx.invoke(capper_cmd, query=raw)
+                return
+            sport, category, remaining = resolve_optional_filters(tokens)
+            time_text = " ".join(remaining)
+            if sport or category:
+                label, _start, _end, problem = parse_time_filter(time_text, sport=sport)
+                if problem is None:
+                    await post_leaderboard_query(ctx, time_text, sport_name=sport, wager_category=category)
+                    return
+            label, _start, _end, problem = parse_time_filter(raw)
+            if problem is None and label != "All-Time":
+                await post_leaderboard_query(ctx, raw)
+                return
+        await ctx.send("Unknown command. Try `bt!commands`, `bt!PropKitchen NBA October`, or `bt!last 14 days NBA`.")
+        return
+    if isinstance(error, commands.CheckFailure) and ctx.guild is None:
+        await ctx.send("BetTracker commands must be used inside a Discord server.")
+        return
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Server** permission to run that command.")
         return
@@ -4619,6 +5158,46 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 # =====================
 # AUTOPOST
 # =====================
+
+async def ping_monthly_vip_roles(channel: discord.abc.Messageable, month_label: str) -> None:
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return
+    setting = cur.execute(
+        "SELECT monthly_role_ids FROM recap_settings WHERE guild_id = ?", (int(guild.id),)
+    ).fetchone()
+    if not setting or not setting[0]:
+        return
+    role_ids = [int(v) for v in setting[0].split(",") if v.isdigit()]
+    roles = [guild.get_role(role_id) for role_id in role_ids]
+    roles = [role for role in roles if role is not None and not role.is_default()]
+    if not roles:
+        return
+    await channel.send(
+        f"📅 **{month_label} Monthly VIP Recap**\n"
+        + " ".join(role.mention for role in roles)
+        + "\nReview all the monthly results above, including losses and ROI.",
+        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=roles),
+    )
+
+
+def autopost_was_sent(cadence: str, period_key: str) -> bool:
+    return cur.execute(
+        "SELECT 1 FROM autopost_history WHERE cadence = ? AND period_key = ?",
+        (cadence, period_key),
+    ).fetchone() is not None
+
+
+def remember_autopost(cadence: str, period_key: str) -> None:
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO autopost_history (cadence, period_key, posted_utc)
+        VALUES (?, ?, ?)
+        """,
+        (cadence, period_key, utc_iso(datetime.now(timezone.utc))),
+    )
+    conn.commit()
+
 
 _last_post_key: Dict[str, Optional[str]] = {"daily": None, "weekly": None, "monthly": None, "yearly": None}
 
@@ -4642,10 +5221,11 @@ async def autopost_loop() -> None:
     # Daily: yesterday
     yesterday = nl.date() - timedelta(days=1)
     day_key = yesterday.isoformat()
-    if _last_post_key["daily"] != day_key:
+    if _last_post_key["daily"] != day_key and not autopost_was_sent("daily", day_key):
         _last_post_key["daily"] = day_key
         start_l, end_l = period_bounds_local("daily", yesterday)
         await post_period_summary(channel, banner(f"DAILY ({day_key})"), start_l, end_l)
+        remember_autopost("daily", day_key)
 
     # Weekly: previous week on Monday
     if nl.weekday() == WEEKLY_POST_WEEKDAY:
@@ -4654,27 +5234,34 @@ async def autopost_loop() -> None:
         week_start = start_l.date()
         week_end = (end_l - timedelta(days=1)).date()
         week_key = f"{week_start.isoformat()}_{week_end.isoformat()}"
-        if _last_post_key["weekly"] != week_key:
+        if _last_post_key["weekly"] != week_key and not autopost_was_sent("weekly", week_key):
             _last_post_key["weekly"] = week_key
             await post_period_summary(channel, banner(f"WEEKLY ({week_start} → {week_end})"), start_l, end_l)
+            remember_autopost("weekly", week_key)
 
-    # Monthly: previous month on the 1st
+    # Monthly: previous month on the 3rd
     if nl.day == MONTHLY_POST_DAY:
-        prev_month_ref = nl.date() - timedelta(days=1)
+        prev_month_ref = nl.date().replace(day=1) - timedelta(days=1)
         start_l, end_l = period_bounds_local("monthly", prev_month_ref)
         month_label = f"{start_l.year}-{start_l.month:02d}"
-        if _last_post_key["monthly"] != month_label:
+        if _last_post_key["monthly"] != month_label and not autopost_was_sent("monthly", month_label):
             _last_post_key["monthly"] = month_label
             await post_period_summary(channel, banner(f"MONTHLY ({month_label})"), start_l, end_l)
+            try:
+                await ping_monthly_vip_roles(channel, month_label)
+            except discord.DiscordException as exc:
+                print(f"Monthly VIP role ping failed: {type(exc).__name__}")
+            remember_autopost("monthly", month_label)
 
     # Yearly: previous year on Jan 1
     if nl.month == 1 and nl.day == 1:
         prev_year_ref = nl.date() - timedelta(days=1)
         start_l, end_l = period_bounds_local("yearly", prev_year_ref)
         year_label = f"{start_l.year}"
-        if _last_post_key["yearly"] != year_label:
+        if _last_post_key["yearly"] != year_label and not autopost_was_sent("yearly", year_label):
             _last_post_key["yearly"] = year_label
             await post_period_summary(channel, banner(f"YEARLY ({year_label})"), start_l, end_l)
+            remember_autopost("yearly", year_label)
 
 
 if not TOKEN:

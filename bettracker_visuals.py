@@ -18,6 +18,7 @@ def generate_recap_card(
     rows: List[Tuple[str, float, int, int, int]],
     summary: Optional[Dict[str, object]] = None,
     period_label: str = "",
+    section_title: str = "CAPPER LEADERBOARD",
 ) -> io.BytesIO:
     """Create a dark, readable 4:5 PNG suitable for sharing on X."""
     totals = summary or {}
@@ -65,7 +66,7 @@ def generate_recap_card(
         put(x + .018, .759, label, 10, subdued, True)
         put(x + .018, .715, value, 21 if len(value) < 10 else 16, color, True)
 
-    put(.07, .641, "CAPPER LEADERBOARD", 18, white, True)
+    put(.07, .641, section_title[:24], 18, white, True)
     put(.93, .641, f"{count} BETS", 11, subdued, True, "right")
     featured = rows[:8]
     if not featured:

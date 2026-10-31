@@ -55,7 +55,7 @@ from typing import Dict, List, Optional, Tuple
 import discord
 from bettracker_sports import infer_sports_from_text
 import matplotlib.pyplot as plt
-from bettracker_visuals import generate_recap_card
+from bettracker_visuals import generate_recap_card, generate_play_recap_card
 from discord.ext import commands, tasks
 
 try:
@@ -1468,22 +1468,15 @@ async def post_leaderboard(
     await send_styled_report(channel, text, heading=f"VIP RESULTS  /  {period_label}")
 
     if include_chart:
-        rows = fetch_leaderboard_rows(where_sql, params, include_zero_cappers=False)
-        chart_rows = [
-            (name, net, wins, losses, pushes)
-            for name, total, _risk, net, wins, losses, pushes, _voids, _wp, _roi in rows
-            if total > 0
-        ]
-        if chart_rows:
-            try:
-                image = generate_units_chart(
-                    title, chart_rows, overall=stats_values(where_sql, params),
-                    period_label=period_label,
-                )
-                await channel.send(file=discord.File(image, filename="propkitchen_vip_recap.png"))
-            except Exception as exc:
-                # Presentation failures must never suppress the actual VIP recap.
-                print(f"VIP graphic unavailable: {type(exc).__name__}: {exc}")
+        # No extra graphic for short single-day/single-sport VIP results.
+        # Broader summaries use a real play list instead of empty leaderboard art.
+        await send_optional_social_recap(
+            channel, where_sql, params,
+            title="PropKitchen VIP Results",
+            filters=period_label + (f" · {sport_name}" if sport_name else "")
+                    + (f" · {wager_category_label(wager_category)}" if wager_category else ""),
+            include_capper=True,
+        )
 
 
 def fetch_recent_bets(
@@ -1630,6 +1623,78 @@ async def send_styled_report(
                 for plain_chunk in split_discord_text(remaining, limit=1800):
                     await destination.send(plain_chunk)
             return
+
+
+def social_recap_eligible(where_sql: str, params: Tuple[object, ...]) -> bool:
+    """Only create an extra image for substantive multi-day/multi-sport reports.
+
+    A one-day, one-sport recap is complete in its Discord embed; attaching
+    the old empty 4:5 sport-breakdown image just adds clutter.
+    """
+    row = cur.execute(
+        f"""
+        SELECT
+            COUNT(*),
+            COUNT(DISTINCT COALESCE(NULLIF(bet_date, ''), substr(graded_utc, 1, 10))),
+            COUNT(DISTINCT UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN')))
+        FROM bets
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    if not row:
+        return False
+    wagers, distinct_days, distinct_sports = (int(v or 0) for v in row)
+    return wagers >= 6 and (distinct_days > 1 or distinct_sports > 1)
+
+
+def social_recap_play_rows(
+    where_sql: str, params: Tuple[object, ...], include_capper: bool = False,
+) -> Tuple[List[Tuple[str, str]], int]:
+    """Use existing graded data, without altering recorded wagers or ROI."""
+    total = int(stats_values(where_sql, params)["total"])
+    recent = fetch_recent_bets(where_sql, params, limit=16, offset=0)
+    output: List[Tuple[str, str]] = []
+    for row in recent:
+        graded, capper, result, risk, net, content, market, odds, sport, jump, category, platform, bet_date = row
+        if category == WAGER_DFS:
+            description = f"{platform or 'DFS'} {odds or ''} slip".strip()
+        else:
+            description = compact_bet_description(content, market, max_len=125)
+            # For shareable recaps, use complete bet language (not shorthand).
+            description = re.sub(r"(?i)(?<![A-Z0-9])o(?=\d)", "over ", description)
+            description = re.sub(r"(?i)(?<![A-Z0-9])u(?=\d)", "under ", description)
+        if include_capper:
+            description = f"{capper} · {description}"
+        output.append((result, description))
+    return output, total
+
+
+async def send_optional_social_recap(
+    destination: discord.abc.Messageable,
+    where_sql: str,
+    params: Tuple[object, ...],
+    title: str,
+    filters: str,
+    include_capper: bool = False,
+) -> None:
+    """Optional visual enhancement only; the complete embed is always first."""
+    try:
+        if not social_recap_eligible(where_sql, params):
+            return
+        plays, total = social_recap_play_rows(
+            where_sql, params, include_capper=include_capper,
+        )
+        if not plays:
+            return
+        image = generate_play_recap_card(
+            title, stats_values(where_sql, params), plays, filters, total,
+        )
+        await destination.send(file=discord.File(
+            image, filename="propkitchen_recap.png",
+        ))
+    except Exception as exc:
+        print(f"Optional shareable recap graphic unavailable: {type(exc).__name__}: {exc}")
 
 
 def stats_values(where_sql: str, params: Tuple[object, ...]) -> Dict[str, object]:
@@ -1789,7 +1854,10 @@ def build_filtered_summary_text(
         return "\n".join(lines + ["No bets found for this selection."])
 
     bets = fetch_recent_bets(where_sql, params, limit=page_size, offset=(page - 1) * page_size)
-    lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
+    if max_pages == 1:
+        lines.append(f"\n**Wager details** ({total} bets)")
+    else:
+        lines.append(f"\n**Wager details — page {page}/{max_pages}** ({len(bets)} of {total} bets)")
     if max_pages > 1:
         lines.append(f"To see other pages, repeat the command with `page 2`, `page 3`, etc. Complete export: `bt!export`.")
 
@@ -1864,33 +1932,19 @@ async def post_filtered_summary(
     )
     await send_styled_report(ctx, text, heading=f"{capper_name or 'VIP'}  /  BET RESULTS")
 
-    # A standalone, 4:5 performance graphic is easier to screenshot or post on X.
+    # Only substantive multi-day or multi-sport summaries get an extra image.
+    # Images list actual plays, with complete odds/net/jump details above.
     if capper_name and page == 1:
-        try:
-            breakdown = fetch_group_breakdown(
-                where_sql, params, "UPPER(COALESCE(NULLIF(sport, ''), 'UNKNOWN'))"
-            )
-            if breakdown:
-                sport_rows = [
-                    (
-                        sport, float(stats["net"]), int(stats["wins"]),
-                        int(stats["losses"]), int(stats["pushes"]),
-                    )
-                    for sport, stats in sorted(
-                        breakdown, key=lambda pair: float(pair[1]["net"]), reverse=True
-                    )
-                ]
-                image = generate_recap_card(
-                    capper_name,
-                    sport_rows,
-                    summary=stats_values(where_sql, params),
-                    period_label=period_label,
-                    section_title="SPORT BREAKDOWN",
-                )
-                await ctx.send(file=discord.File(image, filename="propkitchen_capper_recap.png"))
-        except Exception as exc:
-            # Bot reports must succeed even when an optional image renderer fails.
-            print(f"Capper recap image unavailable: {type(exc).__name__}: {exc}")
+        applied = [period_label]
+        if sport_name:
+            applied.append(sport_name)
+        if wager_category:
+            applied.append(wager_category_label(wager_category))
+        if filter_label:
+            applied.append(filter_label)
+        await send_optional_social_recap(
+            ctx, where_sql, params, capper_name, " · ".join(applied),
+        )
 
 
 def fetch_group_breakdown(

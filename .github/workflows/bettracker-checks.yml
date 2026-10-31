@@ -3,6 +3,7 @@ name: BetTracker checks
 on:
   push:
     branches:
+      - main
       - commercial-dev
       - release/november-2026-bot
   pull_request:

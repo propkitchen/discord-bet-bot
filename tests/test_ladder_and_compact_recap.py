@@ -150,6 +150,21 @@ class GradingIntegrationTests(unittest.TestCase):
         self.assertEqual(1, self.cur.execute("SELECT COUNT(*) FROM ladder_sources").fetchone()[0])
         self.assertFalse(warnings)
 
+    def test_four_rungs_have_independent_risk_and_profit(self):
+        # Two lower rungs win while the two highest thresholds lose.
+        # Each independent stake contributes once, never as a combined parlay.
+        odds = [-110, 120, 240, 500]
+        risk = [0.75, 0.5, 0.25, 0.1]
+        results = ["win", "win", "loss", "loss"]
+        net = [
+            stake * (100 / abs(price) if price < 0 else price / 100)
+            if outcome == "win" else -stake
+            for stake, price, outcome in zip(risk, odds, results)
+        ]
+        self.assertEqual(4, len(net))
+        self.assertAlmostEqual(sum(risk), 1.6, places=4)
+        self.assertAlmostEqual(sum(net), 0.931818, places=5)
+
     def test_legacy_grading_path_kept_for_every_bot_rung(self):
         fn = next(node for node in TREE.body
                   if isinstance(node, ast.AsyncFunctionDef)

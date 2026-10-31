@@ -117,6 +117,7 @@ TRACKED_CHANNELS: Dict[int, Capper] = {
     1430746272192659569: Capper("mikelocks", 1430751846125010970),
     1424256774692667422: Capper("betsbybray", 865284268745949194),
     1515610298696863885: Capper("DaijonBets", 1168899954660614155),
+    1492009669395480686: Capper("sgtprops", 495687263661850634),
 }
 
 # Preserve existing capper mappings and all historical records. Inactive
@@ -1972,6 +1973,7 @@ def capper_aliases() -> Dict[str, str]:
     aliases.setdefault("daijonbets", "DaijonBets")
     aliases.setdefault("stevie", "pxs")
     aliases.setdefault("picksxstevie", "pxs")
+    aliases.setdefault("sgt", "sgtprops")
     return aliases
 
 
@@ -2982,6 +2984,9 @@ async def on_message(message: discord.Message) -> None:
 async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
     if bot.user and after.author.id == bot.user.id:
         return
+    # Ignore Discord embed/link-preview updates with unchanged wager text.
+    if message_to_text(before) == message_to_text(after):
+        return
     if is_bot_command_message(after):
         return
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
@@ -2993,22 +2998,11 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
 
     content = message_to_text(after)
     if pending_exists(after.id):
-        if not refresh_pending_from_message(after, capper):
-            await send_temporary_notice(
-                after,
-                "❌ **Edit not applied: units are missing.** Keep `1u`, `0.5u`, etc. in the original post.",
-            )
-            return
-        await warn_about_tracked_format(after, content)
+        refresh_pending_from_message(after, capper)
         return
 
-    # A capper can correct a duplicate-flagged or incomplete post by editing it.
+    # Corrected edits remain silent. Tracking happens only when units are supplied.
     if parse_risk_units(content) is None:
-        if looks_like_wager_message(after, content):
-            await send_temporary_notice(
-                after,
-                "❌ **Bet not tracked: units are missing.** Start with `1u`, `0.5u`, or `0.25u`.",
-            )
         return
 
     inserted, duplicate_message_id = insert_pending(
@@ -3023,13 +3017,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     )
     if inserted:
         await safe_clear_reaction(after, DUPLICATE_REACTION)
-        reaction_added = await safe_add_reaction(after, PENDING_REACTION)
-        if not reaction_added:
-            await send_temporary_notice(
-                after,
-                "⚠️ **The bet was saved, but I could not add 📝.** Check the bot's reaction permissions.",
-            )
-        await warn_about_tracked_format(after, content)
+        await safe_add_reaction(after, PENDING_REACTION)
     elif duplicate_message_id is not None:
         await safe_add_reaction(after, DUPLICATE_REACTION)
 
@@ -3059,21 +3047,11 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
 
     content = message_to_text(message)
     if pending_exists(payload.message_id):
-        if not refresh_pending_from_message(message, capper):
-            await send_temporary_notice(
-                message,
-                "❌ **Edit not applied: units are missing.** Keep the stake in the original post.",
-            )
-            return
-        await warn_about_tracked_format(message, content)
+        refresh_pending_from_message(message, capper)
         return
 
+    # Avoid chat spam for raw/background Discord edit events.
     if parse_risk_units(content) is None:
-        if looks_like_wager_message(message, content):
-            await send_temporary_notice(
-                message,
-                "❌ **Bet not tracked: units are missing.** Start with `1u`, `0.5u`, or `0.25u`.",
-            )
         return
 
     inserted, duplicate_message_id = insert_pending(
@@ -3088,13 +3066,7 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
     )
     if inserted:
         await safe_clear_reaction(message, DUPLICATE_REACTION)
-        reaction_added = await safe_add_reaction(message, PENDING_REACTION)
-        if not reaction_added:
-            await send_temporary_notice(
-                message,
-                "⚠️ **The bet was saved, but I could not add 📝.** Check the bot's reaction permissions.",
-            )
-        await warn_about_tracked_format(message, content)
+        await safe_add_reaction(message, PENDING_REACTION)
     elif duplicate_message_id is not None:
         await safe_add_reaction(message, DUPLICATE_REACTION)
 
@@ -3438,43 +3410,53 @@ async def clear_pending_rows(ctx: commands.Context, where_sql: str, params: Tupl
         await ctx.send("Run this command inside a Discord server.")
         return
 
+    # Always restrict bulk deletion to the invoking Discord server.
     scoped_where_sql = f"guild_id = ? AND ({where_sql})"
     scoped_params = (int(ctx.guild.id), *params)
-    rows = cur.execute(
-        f"""
-        SELECT message_id, channel_id, capper
-        FROM pending
-        WHERE {scoped_where_sql}
-        """,
-        scoped_params,
-    ).fetchall()
 
-    if not rows:
+    # Large backlogs should not require hundreds of Discord API fetches
+    # before the database rows are deleted.
+    count_row = cur.execute(
+        f"SELECT COUNT(*) FROM pending WHERE {scoped_where_sql}",
+        scoped_params,
+    ).fetchone()
+    pending_count = int(count_row[0] or 0) if count_row else 0
+    if not pending_count:
         await ctx.send(f"📝 No pending bets found for **{label}**.")
         return
 
-    # Remove the 📝 reaction where possible. If Discord permissions fail, the DB cleanup still works.
-    reactions_cleared = 0
-    for message_id, channel_id, capper_name in rows:
-        channel = bot.get_channel(int(channel_id))
-        if channel is None:
-            continue
-        try:
-            msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
-            await msg.clear_reaction(PENDING_REACTION)
-            reactions_cleared += 1
-        except Exception:
-            continue
+    recent_rows = cur.execute(
+        f"""
+        SELECT message_id, channel_id
+        FROM pending
+        WHERE {scoped_where_sql}
+        ORDER BY created_utc DESC
+        LIMIT 50
+        """,
+        scoped_params,
+    ).fetchall()
 
     cur.execute(f"DELETE FROM pending WHERE {scoped_where_sql}", scoped_params)
     conn.commit()
 
     await ctx.send(
         f"✅ **Pending Cleared: {label}**\n"
-        f"Removed pending rows: **{len(rows)}**\n"
-        f"Removed 📝 reactions where possible: **{reactions_cleared}**\n"
-        "Graded bet history was **not** deleted."
+        f"Removed pending rows: **{pending_count}**\n"
+        "Graded bet history was **not** deleted.\n"
+        "Cleaning 📝 reactions from up to the 50 most recent cleared messages where possible."
     )
+
+    # Best-effort cosmetic cleanup. Older 📝 reactions may remain in Discord,
+    # but those wagers are no longer pending in the database.
+    for message_id, channel_id in recent_rows:
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            continue
+        try:
+            msg = await channel.fetch_message(int(message_id))  # type: ignore[attr-defined]
+            await msg.clear_reaction(PENDING_REACTION)
+        except Exception:
+            continue
 
 
 @bot.command(name="clear_pending")

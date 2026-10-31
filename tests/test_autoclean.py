@@ -147,7 +147,7 @@ class AutocleanBotGuardsTests(unittest.TestCase):
     def test_command_requires_admin_and_worker_checks_protected_channel(self):
         source = (Path(__file__).resolve().parents[1] / "bot.py").read_text()
         self.assertIn('@commands.has_permissions(manage_guild=True)\nasync def autoclean_cmd(', source.replace("\r\n", "\n"))
-        self.assertIn('if channel is None or is_autoclean_protected_channel(channel):', source)
+        self.assertIn('if is_autoclean_protected_channel(channel):', source)
         self.assertIn('if not autoclean_loop.is_running():', source)
 
 

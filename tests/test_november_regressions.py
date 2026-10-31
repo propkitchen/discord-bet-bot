@@ -99,13 +99,13 @@ class ReportingTests(unittest.TestCase):
             "CREATE TABLE bets (graded_utc TEXT, capper TEXT, result TEXT, "
             "risk_units REAL, net_units REAL, content TEXT, market TEXT, "
             "odds_text TEXT, sport TEXT, jump_url TEXT, wager_category TEXT, "
-            "platform TEXT, sportsbook TEXT, guild_id INTEGER, message_id INTEGER, channel_id INTEGER)"
+            "platform TEXT, sportsbook TEXT, guild_id INTEGER, message_id INTEGER, channel_id INTEGER, bet_date TEXT)"
         )
         cur.executemany(
-            "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (f"2026-10-{i // 24 + 1:02d}T{i % 24:02d}:00:00", "test", "win",
-                 1.0, 1.0, str(i), "PTS", "-100", "NBA", "", "STRAIGHT", "", "", 303, 1000 + i, 123)
+                 1.0, 1.0, str(i), "PTS", "-100", "NBA", "", "STRAIGHT", "", "", 303, 1000 + i, 123, "2026-10-30")
                 for i in range(100)
             ],
         )

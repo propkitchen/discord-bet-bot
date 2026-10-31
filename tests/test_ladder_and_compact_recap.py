@@ -132,6 +132,7 @@ class GradingIntegrationTests(unittest.TestCase):
             "utc_iso": lambda dt: dt.isoformat(),
             "insert_pending": insert_pending,
             "safe_add_reaction": AsyncMock(return_value=True),
+            "PENDING_REACTION": "📝",
         }
         fn = load("track_ladder_post", ctx)
         capper = types.SimpleNamespace(name="PropKitchen", user_id=99)

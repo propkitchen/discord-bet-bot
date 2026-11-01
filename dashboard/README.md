@@ -47,6 +47,34 @@ requirement, not a completed OAuth2 feature yet.
   The prototype's sample capper picker is ONLY a demo feature and must not
   become the authorization mechanism for real users.
 
+## Team dashboard access policy (approved SaaS product specification)
+
+**Default: Admins Only.** Discord server administrators can view the team-wide
+dashboard and manage its visibility. Regular cappers open My Dashboard and
+see only their own authorized records by default.
+
+Server owners may configure Team Dashboard visibility per guild:
+
+1. **Admins only (default):** owner and permitted managers.
+2. **Admins + designated roles:** selected Discord roles (such as VIP Chefs).
+3. **Members:** authenticated members of the selected server.
+4. **Public aggregate scoreboard:** separate, explicitly enabled public
+   statistics page with a clear tracking start date; no private bet details
+   or sensitive identifiers. Public scoreboards are OFF by default.
+
+Team visibility does not grant access to capper administration, grading,
+other servers, audit correction tools, or private individual details.
+Management access remains separately restricted to authorized server admins.
+
+The owner must confirm each visibility change, which is logged. Each query
+must verify the authenticated Discord identity, authorized guild, and
+role/permissions server-side; hiding menu items is insufficient. Cache
+membership carefully and revoke access promptly on role/server changes.
+Never let a user select another guild or capper ID to bypass authorization.
+
+These are requirements for OAuth2/backend development, NOT existing
+functional permission controls in the demo-only prototype.
+
 ## Next implementation milestones
 
 1. Review visual design, names, filters, and mobile ergonomics using the prototype.

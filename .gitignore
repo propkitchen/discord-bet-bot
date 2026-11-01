@@ -2,3 +2,10 @@
 
 __pycache__/
 *.pyc
+
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.env*
+!dashboard/.env.example
+dashboard/*.tsbuildinfo
+dashboard/out/

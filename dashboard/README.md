@@ -28,6 +28,25 @@ Then visit http://localhost:3000.
 Quality checks: `npm run typecheck` and `npm run build`. An isolated GitHub Actions
 workflow also checks the dashboard branch. The live Python bot is unchanged.
 
+## Agreed default after Discord login
+
+**My Dashboard is the homepage for signed-in cappers.** This is a product
+requirement, not a completed OAuth2 feature yet.
+
+- After a successful Discord OAuth2 callback, authenticate the session and
+  resolve the Discord user ID to the capper profiles they are authorized to see.
+- Open **My Dashboard** with **only that user's authorized personal records**
+  selected by default. If they cap in multiple servers, use the last
+  authorized server or a server picker; never merge server data without
+  explicitly selecting an authorized scope.
+- A separate **Team Dashboard** is available only when the owner allows
+  team-wide viewing. Admin configuration has separate role checks.
+- A Discord login that has no capper profile should show an onboarding/access
+  explanation, not silently fall through to another person's statistics.
+- All authorization must be enforced on the backend for each database query.
+  The prototype's sample capper picker is ONLY a demo feature and must not
+  become the authorization mechanism for real users.
+
 ## Next implementation milestones
 
 1. Review visual design, names, filters, and mobile ergonomics using the prototype.

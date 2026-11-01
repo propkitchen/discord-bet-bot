@@ -123,21 +123,21 @@ export default function Dashboard() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">B</span><span className="brand-text">Bet<span>Tracker</span></span></div>
         <p className="nav-title">WORKSPACE</p>
-        <a href="#overview" className="nav-link selected">◫ <span>Overview</span></a>
+        <a href="#overview" className="nav-link selected">◫ <span>My Dashboard</span></a>
         <a href="#insights" className="nav-link">⌁ <span>Analytics</span></a>
         <a href="#filters" className="nav-link">☷ <span>Filters</span></a>
         <a href="#history" className="nav-link">▤ <span>Wager history</span></a>
         <p className="sidebar-foot">● Development preview <small>Not connected to Discord</small></p>
       </aside>
       <main className="main">
-        <header className="topbar"><div>Dashboard <span>/ Performance</span></div><div className="user-chip">● Demo mode <b>SC</b></div></header>
+        <header className="topbar"><div>My Dashboard <span>/ Performance</span></div><div className="user-chip">● Demo mode <b>SC</b></div></header>
         <div className="page" id="overview">
           <section className="intro">
-            <div><p className="eyebrow">BETTRACKER · ANALYTICS</p><h1>Performance overview</h1><p>Analyze every wager, not just the highlights.</p></div>
+            <div><p className="eyebrow">BETTRACKER · ANALYTICS</p><h1>My Dashboard</h1><p>Your tracked results, performance trends, and betting history in one place.</p></div>
             <div className="demo-banner"><strong>SAMPLE DATA ONLY</strong><small>No real capper or Discord accounts connected</small></div>
           </section>
           <div className="capper-choice">
-            <label>Viewing capper
+            <label>Preview capper (demo only)
               <select value={capper} onChange={(e) => setCapper(e.target.value)}>
                 <option value={ALL}>All sample cappers</option>
                 {choices.capper.map((name) => <option key={name} value={name}>{name}</option>)}

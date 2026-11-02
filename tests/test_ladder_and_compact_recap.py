@@ -115,6 +115,21 @@ class TwoLadderTypesTests(unittest.TestCase):
         self.assertEqual(1, day.risk)
         self.assertEqual("+100", day.odds)
 
+    def test_first_day_launch_without_day_label(self):
+        post = (
+            "The Balls Out Bets Challenge\n"
+            "Goal: $25 -> $500 in 6 bets\n"
+            "1️⃣ $25 -> $50\n"
+            "2️⃣ $50 -> $100 pocket $25\n"
+            "3️⃣ $75 -> $150 pocket $50\n"
+            "1U | NFL | Bears +10.5 Caleb 180 pass yards | odds +100"
+        )
+        self.assertTrue(is_challenge_day(post))
+        day = parse_challenge_day(post)
+        self.assertEqual(0, day.day)
+        self.assertEqual(1, day.risk)
+        self.assertEqual("+100", day.odds)
+
     def test_day_2_and_4_with_pocketing_notes(self):
         for n, units in [(2, 2), (4, 4)]:
             x = f"🪜 Ladder Challenge Day {n}\n{units}u Aaron Judge 2+ Total Bases (2x)\nPocketed $25"
@@ -186,6 +201,11 @@ class LadderLedgerTests(unittest.TestCase):
                 re.findall(r"[+-]\d{2,5}", content)[0] if re.findall(r"[+-]\d{2,5}", content) else ""
             ),
             "authorized_to_grade": lambda uid, owner: uid == owner or uid == 1,
+            "SimpleNamespace": types.SimpleNamespace,
+            "parse_risk_units": lambda content: float(re.search(
+                r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*u\b", content, re.I
+            ).group(1)),
+            "record_wager_edit": lambda *args: self.alerts.append("EDIT LOGGED"),
         }
         self.ctx["pending_exists"] = lambda mid: self.cur.execute(
             "SELECT 1 FROM pending WHERE message_id=?", (mid,)
@@ -193,12 +213,14 @@ class LadderLedgerTests(unittest.TestCase):
         self.ctx["bet_exists"] = lambda mid: self.cur.execute(
             "SELECT 1 FROM bets WHERE message_id=?", (mid,)
         ).fetchone() is not None
+        self.ctx["refresh_pending_from_message"] = self.refresh_pending
         self.ctx["insert_pending"] = self.insert_pending
         self.ctx["grade_pending"] = self.grade_pending
         self.ctx["regrade_bet"] = self.regrade_bet
         self.ctx["ungrade_bet"] = self.ungrade_bet
         for name in ("ladder_rung_ids", "next_ladder_internal_id", "update_ladder_indicator",
-                     "process_ladder_reaction", "track_ladder_post"):
+                     "process_ladder_reaction", "track_ladder_post",
+                     "correction_proxy", "sync_ladder_edit"):
             self.ctx[name] = load(name, self.ctx)
 
     def tearDown(self):
@@ -210,6 +232,12 @@ class LadderLedgerTests(unittest.TestCase):
         self.cur.execute("INSERT INTO pending VALUES (?, ?)", (mid, content))
         self.db.commit()
         return True, None
+
+    def refresh_pending(self, proxy, capper):
+        self.cur.execute("UPDATE pending SET content=? WHERE message_id=?",
+                         (proxy.content, proxy.id))
+        self.db.commit()
+        return True
 
     def grade_pending(self, mid, result, emoji, uid):
         self.cur.execute("DELETE FROM pending WHERE message_id=?", (mid,))
@@ -271,6 +299,39 @@ class LadderLedgerTests(unittest.TestCase):
             "SELECT result FROM bets WHERE message_id=?",
             (self.ctx["ladder_rung_ids"](500)[3],)
         ).fetchone()[0])
+
+    def test_finish_reaction_removal_reopens_only_auto_closed_rungs(self):
+        self.create_ladder()
+        self.fire("✅")
+        self.fire("1️⃣")
+        self.fire("🏁")
+        self.assertEqual(0, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.fire("🏁", removed=True)
+        self.assertEqual(3, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.assertEqual(2, self.cur.execute("SELECT COUNT(*) FROM bets").fetchone()[0])
+
+    def test_correction_before_grade_and_refuse_after_grade(self):
+        self.create_ladder()
+        self.original.content = self.PROP.replace("0.8u", "0.6u").replace(
+            "(+400 FanDuel)", "(+425 FanDuel)"
+        )
+        capper = types.SimpleNamespace(name="Sample", user_id=99)
+        asyncio.run(self.ctx["sync_ladder_edit"](self.original, capper))
+        ids = self.ctx["ladder_rung_ids"](500)
+        self.assertIn("0.6u", self.cur.execute(
+            "SELECT content FROM pending WHERE message_id=?", (ids[0],)
+        ).fetchone()[0])
+        self.assertIn("+425", self.cur.execute(
+            "SELECT content FROM pending WHERE message_id=?", (ids[2],)
+        ).fetchone()[0])
+        self.assertIn("EDIT LOGGED", self.alerts)
+        self.fire("✅")
+        self.original.content = self.original.content.replace("0.6u", "1.6u")
+        asyncio.run(self.ctx["sync_ladder_edit"](self.original, capper))
+        self.assertEqual("win", self.cur.execute(
+            "SELECT result FROM bets WHERE message_id=?", (ids[0],)
+        ).fetchone()[0])
+        self.assertTrue(any("partly graded" in note for note in self.alerts))
 
     def test_unauthorized_reaction_cannot_grade(self):
         self.create_ladder()

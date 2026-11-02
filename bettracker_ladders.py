@@ -51,11 +51,20 @@ def is_ladder_post(text: str) -> bool:
 
 
 def is_challenge_day(text: str) -> bool:
-    """A day-by-day bankroll challenge is NOT a multi-rung single-event ladder."""
+    """Detect day-by-day bankroll challenges, including first-day launch posts.
+
+    A post with a six-day dollar progression but no explicit Day 1 label is
+    still a challenge, not six prop-ladder rungs.
+    """
     if not text:
         return False
     day = DAY_MARKER.search(text)
-    return bool(day and (is_ladder_post(text) or CHALLENGE_MARKER.search(text)))
+    if day and (is_ladder_post(text) or re.search(r"(?i)\bchallenge\b", text)):
+        return True
+    dollar_steps = re.findall(
+        r"(?i)\$\s*\d+(?:\.\d+)?\s*(?:->|→|to)\s*\$?\s*\d+", text
+    )
+    return bool(re.search(r"(?i)\bchallenge\b", text) and len(dollar_steps) >= 2)
 
 
 def _priced_stake(line: str) -> Optional[Tuple[float, str]]:
@@ -139,8 +148,6 @@ def parse_challenge_day(text: str) -> Optional[LadderChallenge]:
     if not is_challenge_day(text):
         return None
     day = DAY_MARKER.search(text or "")
-    if not day:
-        return None
     valid = [(line.strip(), _priced_stake(line)) for line in text.splitlines()]
     matches = [(line, parsed) for line, parsed in valid if parsed is not None]
     if len(matches) > 1:
@@ -149,4 +156,7 @@ def parse_challenge_day(text: str) -> Optional[LadderChallenge]:
         return None
     line, priced = matches[0]
     assert priced is not None
-    return LadderChallenge(int(day.group(1)), line.replace("🪜", "").strip(), priced[0], priced[1])
+    return LadderChallenge(
+        int(day.group(1)) if day else 0,  # 0 = no explicitly stated day number
+        line.replace("🪜", "").strip(), priced[0], priced[1],
+    )

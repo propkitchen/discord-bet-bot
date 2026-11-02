@@ -3519,7 +3519,11 @@ async def on_message(message: discord.Message) -> None:
         return
 
     content = message_to_text(message)
-    if is_ladder_post(content):
+    if is_challenge_day(content):
+        await track_challenge_day(message, capper)
+        await bot.process_commands(message)
+        return
+    if is_multi_wager_post(content) or has_multiple_staked_lines(content):
         await track_ladder_post(message, capper)
         await bot.process_commands(message)
         return
@@ -3590,10 +3594,18 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
         return
 
     content = message_to_text(after)
-    if is_ladder_post(content):
-        await track_ladder_post(after, capper)
+    if is_challenge_day(content):
+        if pending_exists(after.id):
+            # Avoid refreshing a saved challenge bet from rollover math.
+            await send_temporary_notice(
+                after, "🪜 This day's wager was already tracked. To correct "
+                "a posted wager, contact the tracker admin.",
+            )
+        else:
+            await track_challenge_day(after, capper)
         return
-    if has_multiple_staked_lines(content):
+    if is_multi_wager_post(content) or has_multiple_staked_lines(content):
+        await track_ladder_post(after, capper)
         return
     if pending_exists(after.id):
         refresh_pending_from_message(after, capper)
@@ -3646,10 +3658,12 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
 
     content = message_to_text(message)
-    if is_ladder_post(content):
-        await track_ladder_post(message, capper)
+    if is_challenge_day(content):
+        if not pending_exists(payload.message_id):
+            await track_challenge_day(message, capper)
         return
-    if has_multiple_staked_lines(content):
+    if is_multi_wager_post(content) or has_multiple_staked_lines(content):
+        await track_ladder_post(message, capper)
         return
     if pending_exists(payload.message_id):
         refresh_pending_from_message(message, capper)
@@ -3678,6 +3692,8 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     if not bot.user or payload.user_id == bot.user.id:
+        return
+    if await process_ladder_reaction(payload):
         return
 
     emoji = str(payload.emoji)
@@ -3713,6 +3729,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
     if not bot.user:
+        return
+    if await process_ladder_reaction(payload, removed=True):
         return
 
     emoji = str(payload.emoji)
@@ -3857,10 +3875,15 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         "dfs": f"0.5u | DFS | Sleeper | Leg 1 + Leg 2 | 1.88x | MLB | {short_date}",
         "ladder": (
             "NFL Drake Maye Pass Yards Ladder 🪜\n"
-            ".75u 225+ Pass Yards (-110)\n"
-            ".5u 250+ Pass Yards (+120) 🪜\n"
-            ".25u 300+ Pass Yards (+240) 🪜\n"
-            ".1u 350+ Pass Yards (+500) 🪜"
+            ".75u Drake Maye 225+ Pass Yds (-110)\n"
+            ".5u Drake Maye 250+ Pass Yds (+120)\n"
+            ".25u Drake Maye 300+ Pass Yds (+240)\n"
+            ".1u Drake Maye 350+ Pass Yds (+500)"
+        ),
+        "challenge": (
+            "NFL 🪜 Bankroll Challenge — Day 2\n"
+            "2u Josh Allen 225+ Pass Yds (-110)\n"
+            "Bankroll/profit taken out are notes, not extra wagers."
         ),
     }
     if key in templates:
@@ -3871,7 +3894,7 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         f"Straight: {templates['straight']}\n"
         f"Parlay: {templates['parlay']}\n"
         f"DFS: {templates['dfs']}\n\n"
-        "Use bt!format straight, parlay, dfs, or ladder."
+        "Use bt!format straight, parlay, dfs, ladder, or challenge."
     )
 
 

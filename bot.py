@@ -48,7 +48,8 @@ from bettracker_autoclean import (
     set_retention_days,
 )
 from bettracker_excel import export_xlsx
-from bettracker_ladders import has_multiple_staked_lines, is_ladder_post, parse_ladder_post
+from bettracker_ladders import (has_multiple_staked_lines, is_ladder_post,
+    is_multi_wager_post, is_challenge_day, parse_challenge_day, parse_ladder_post)
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -3284,106 +3285,187 @@ def ladder_source_exists(message_id: int) -> bool:
     ).fetchone() is not None
 
 
+LADDER_NUMBER_REACTIONS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣")
+LADDER_FINISH_REACTION = "🏁"
+
+
+def ladder_rung_ids(source_id: int) -> List[int]:
+    return [int(r[0]) for r in cur.execute(
+        "SELECT tracked_message_id FROM ladder_rungs WHERE source_message_id = ? ORDER BY rung_number",
+        (int(source_id),),
+    ).fetchall()]
+
+
+def next_ladder_internal_id() -> int:
+    row = cur.execute("""
+        SELECT MIN(mid) FROM (
+            SELECT MIN(tracked_message_id) AS mid FROM ladder_rungs
+            UNION ALL SELECT MIN(message_id) AS mid FROM pending WHERE message_id < 0
+            UNION ALL SELECT MIN(message_id) AS mid FROM bets WHERE message_id < 0
+        )
+    """).fetchone()
+    return min(0, int(row[0] or 0)) - 1
+
+
+async def update_ladder_indicator(message: discord.Message) -> None:
+    rungs = ladder_rung_ids(message.id)
+    if not rungs:
+        return
+    if any(pending_exists(mid) for mid in rungs):
+        await safe_clear_reaction(message, LOGGED_REACTION)
+        await safe_add_reaction(message, PENDING_REACTION)
+    else:
+        await safe_clear_reaction(message, PENDING_REACTION)
+        await safe_add_reaction(message, LOGGED_REACTION)
+
+
+async def process_ladder_reaction(
+    payload: discord.RawReactionActionEvent, removed: bool = False,
+) -> bool:
+    row = cur.execute(
+        """SELECT capper_user_id, rung_count FROM ladder_sources
+           WHERE source_message_id = ? AND guild_id = ? AND channel_id = ?""",
+        (int(payload.message_id), int(payload.guild_id or 0), int(payload.channel_id)),
+    ).fetchone()
+    if not row:
+        return False
+    emoji = str(payload.emoji)
+    if emoji not in {WIN_EMOJI, LOSS_EMOJI, LADDER_FINISH_REACTION, *LADDER_NUMBER_REACTIONS}:
+        return True
+    if not authorized_to_grade(payload.user_id, int(row[0])):
+        return True
+    ids = ladder_rung_ids(payload.message_id)
+    # Old ladders use real bot reply IDs and retain their previous workflow.
+    if len(ids) != int(row[1]) or not ids or any(mid > 0 for mid in ids):
+        return True
+    index = (0 if emoji in {WIN_EMOJI, LOSS_EMOJI}
+             else LADDER_NUMBER_REACTIONS.index(emoji) + 1
+             if emoji in LADDER_NUMBER_REACTIONS else None)
+    if index is not None and index >= len(ids):
+        return True
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        return True
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except discord.DiscordException:
+        return True
+    if removed:
+        # Undo only the directly associated grade, never other rungs.
+        if index is not None:
+            mid = ids[index]
+            grade = cur.execute(
+                "SELECT grade_reaction, grader_user_id FROM bets WHERE message_id = ?",
+                (mid,),
+            ).fetchone()
+            if grade and str(grade[0]) == emoji and int(grade[1]) == int(payload.user_id):
+                ungrade_bet(mid)
+                await update_ladder_indicator(message)
+        return True
+    if emoji == LADDER_FINISH_REACTION:
+        # Only an EXPLICIT finish declares remaining rungs losses. No guessing.
+        for mid in ids:
+            if pending_exists(mid):
+                grade_pending(mid, "loss", LADDER_FINISH_REACTION, payload.user_id)
+    elif index is not None:
+        mid = ids[index]
+        result = "loss" if emoji == LOSS_EMOJI else "win"
+        if pending_exists(mid):
+            grade_pending(mid, result, emoji, payload.user_id)
+        elif bet_exists(mid):
+            regrade_bet(mid, result, emoji, payload.user_id)
+    await update_ladder_indicator(message)
+    return True
+
+
 async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
-    """One original capper post -> one separately gradeable bot reply per rung."""
+    """One original message and multiple independent DB records; no extra posts."""
     content = message_to_text(message)
-    if not is_ladder_post(content):
+    if is_challenge_day(content) or not (is_ladder_post(content) or is_multi_wager_post(content)):
         return False
     try:
         ladder = parse_ladder_post(content)
     except ValueError as exc:
-        await send_temporary_notice(
-            message,
-            f"🪜 **Ladder not tracked:** {exc}\n"
-            "Add NFL, CFB, NBA, etc. to the heading and keep 2–8 "
-            "individually priced lines. Nothing was saved.",
-        )
+        await send_temporary_notice(message, f"⚠️ **Multi-wager post not tracked:** {exc}")
         return True
-
-    if message.guild is None:
+    if message.guild is None or ladder_source_exists(message.id):
         return True
-
-    # A lone football/basketball emoji is not an unambiguous league.
     context = ladder.preface + "\n" + "\n".join(r.line for r in ladder.rungs)
-    specific_sports = [
-        item for item in infer_sports(context)
-        if item not in {"FOOTBALL", "BASKETBALL", "SOFTBALL"}
-    ]
-    if len(specific_sports) != 1:
-        await send_temporary_notice(
-            message,
-            "🪜 **Ladder not tracked:** include one clear league or player "
-            "in the heading (NFL, CFB, NBA, etc.). "
-            "This avoids recording an ambiguous ladder in the wrong sport.",
-        )
+    sports = [sp for sp in infer_sports(context)
+              if sp not in {"FOOTBALL", "BASKETBALL", "SOFTBALL"}]
+    if len(sports) != 1:
+        await send_temporary_notice(message, "⚠️ **Multi-wager post not tracked:** "
+            "add an unambiguous sport/league (NFL, NBA, MLB, etc.). Nothing was saved.")
         return True
-
-    # Persist source BEFORE replies to prevent duplicate event submissions.
-    cursor = cur.execute(
-        """
-        INSERT OR IGNORE INTO ladder_sources
-        (source_message_id, guild_id, channel_id, capper_user_id, rung_count, created_utc)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            int(message.id), int(message.guild.id), int(message.channel.id),
-            int(capper.user_id), len(ladder.rungs), utc_iso(message.created_at),
-        ),
-    )
-    conn.commit()
-    if cursor.rowcount != 1:
-        return True
-
-    successes = 0
-    for rung in ladder.rungs:
-        inherited = f"{ladder.preface}\n{rung.line}"
-        reply_text = (
-            f"🪜 **LADDER {rung.number}/{len(ladder.rungs)} — "
-            f"{capper.name}**\n{inherited}"
-        )
-        try:
-            child = await message.reply(
-                reply_text,
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
+    recorded = []
+    timestamp = utc_iso(message.created_at)
+    try:
+        first_id = next_ladder_internal_id()
+        for rung in ladder.rungs:
+            mid = first_id - (rung.number - 1)
+            content_for_rung = (ladder.preface + "\n" + rung.line).strip()
+            inserted, _duplicate = insert_pending(
+                mid, message.guild.id, message.channel.id, capper,
+                message.author.id, content_for_rung, timestamp, message.jump_url,
             )
-        except discord.HTTPException as exc:
-            print(f"Could not publish ladder rung: {type(exc).__name__}: {exc}")
-            break
-
-        inserted, duplicate_id = insert_pending(
-            child.id, int(message.guild.id), int(message.channel.id),
-            capper, message.author.id, inherited, utc_iso(message.created_at),
-            child.jump_url,
-        )
-        if not inserted:
-            try:
-                await child.delete()
-            except discord.HTTPException:
-                pass
-            print(f"Ladder rung duplicate/invalid: source={message.id} rung={rung.number}")
-            continue
-
+            if not inserted:
+                raise ValueError(f"Rung {rung.number} could not be saved (invalid or duplicate).")
+            recorded.append((rung.number, mid))
         cur.execute(
-            """INSERT OR IGNORE INTO ladder_rungs
-               (source_message_id, rung_number, tracked_message_id)
-               VALUES (?, ?, ?)""",
-            (int(message.id), rung.number, int(child.id)),
+            """INSERT INTO ladder_sources
+               (source_message_id, guild_id, channel_id, capper_user_id, rung_count, created_utc)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (message.id, message.guild.id, message.channel.id,
+             capper.user_id, len(recorded), timestamp),
+        )
+        cur.executemany(
+            """INSERT INTO ladder_rungs
+               (source_message_id, rung_number, tracked_message_id) VALUES (?, ?, ?)""",
+            [(message.id, n, mid) for n, mid in recorded],
         )
         conn.commit()
-        successes += 1
-        await safe_add_reaction(child, PENDING_REACTION)
+    except (ValueError, sqlite3.DatabaseError) as exc:
+        for _, mid in recorded:
+            cur.execute("DELETE FROM pending WHERE message_id = ?", (mid,))
+        cur.execute("DELETE FROM ladder_rungs WHERE source_message_id = ?", (message.id,))
+        cur.execute("DELETE FROM ladder_sources WHERE source_message_id = ?", (message.id,))
+        conn.commit()
+        await send_temporary_notice(message, f"⚠️ **Ladder not tracked:** {exc}")
+        return True
+    await safe_add_reaction(message, PENDING_REACTION)
+    await safe_add_reaction(message, "🪜")
+    for marker in LADDER_NUMBER_REACTIONS[:len(recorded) - 1]:
+        await safe_add_reaction(message, marker)
+    await safe_add_reaction(message, LADDER_FINISH_REACTION)
+    return True
 
-    if successes == len(ladder.rungs):
-        await safe_add_reaction(message, "🪜")
-    else:
-        await send_temporary_notice(
-            message,
-            f"⚠️ **Ladder partially tracked:** {successes}/{len(ladder.rungs)} "
-            "rungs were saved. Do not repost or grade the original ladder. "
-            "Grade only the individual rung replies, and contact an admin "
-            "to resolve any missing rungs.",
-        )
+
+async def track_challenge_day(message: discord.Message, capper: Capper) -> bool:
+    """One challenge-day wager, regular grading; rollovers/pockets aren't bets."""
+    content = message_to_text(message)
+    if not is_challenge_day(content):
+        return False
+    try:
+        challenge = parse_challenge_day(content)
+    except ValueError as exc:
+        await send_temporary_notice(message, f"⚠️ **Challenge not tracked:** {exc}")
+        return True
+    if challenge is None or message.guild is None:
+        return True  # Announcements and progress posts are not wagers.
+    # Keep day/league context but not monetary projections or other days.
+    heading = "\n".join(
+        line for line in content.splitlines()[:10]
+        if not re.search(r"(?i)(?:\d+(?:\.\d+)?u|\$\s*\d+)", line)
+    )[:250]
+    wager = (heading + "\n" + challenge.wager).strip()
+    inserted, duplicate = insert_pending(
+        message.id, message.guild.id, message.channel.id, capper,
+        message.author.id, wager, utc_iso(message.created_at), message.jump_url,
+    )
+    if inserted:
+        await safe_add_reaction(message, PENDING_REACTION)
+    elif duplicate is not None:
+        await safe_add_reaction(message, DUPLICATE_REACTION)
     return True
 
 

@@ -3364,16 +3364,21 @@ async def process_ladder_reaction(
     except discord.DiscordException:
         return True
     if removed:
-        # Undo only the directly associated grade, never other rungs.
-        if index is not None:
-            mid = ids[index]
+        # Undo only grades made by the removed reaction. Removing 🏁 is a safe
+        # way to reopen its auto-closed losses after a mistaken tap.
+        targets = ids if emoji == LADDER_FINISH_REACTION else (
+            [ids[index]] if index is not None else []
+        )
+        changed = False
+        for mid in targets:
             grade = cur.execute(
                 "SELECT grade_reaction, grader_user_id FROM bets WHERE message_id = ?",
                 (mid,),
             ).fetchone()
             if grade and str(grade[0]) == emoji and int(grade[1]) == int(payload.user_id):
-                ungrade_bet(mid)
-                await update_ladder_indicator(message)
+                changed = bool(ungrade_bet(mid)) or changed
+        if changed:
+            await update_ladder_indicator(message)
         return True
     if emoji == LADDER_FINISH_REACTION:
         # Only an EXPLICIT finish declares remaining rungs losses. No guessing.

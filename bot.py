@@ -3417,7 +3417,16 @@ def make_ladder_record_content(preface: str, rung_line: str, expected_odds: str)
 async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
     """One original message and multiple independent DB records; no extra posts."""
     content = message_to_text(message)
-    if is_challenge_day(content) or not (is_ladder_post(content) or is_multi_wager_post(content)):
+    if is_challenge_day(content):
+        return False
+    if not (is_ladder_post(content) or is_multi_wager_post(content)):
+        if has_multiple_staked_lines(content):
+            await send_temporary_notice(
+                message, "⚠️ **Multiple stakes found, but one or more "
+                "wagers lack their own odds or market.** "
+                "Nothing was tracked; add a price to each line.",
+            )
+            return True
         return False
     try:
         ladder = parse_ladder_post(content)

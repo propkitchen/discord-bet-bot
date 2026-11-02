@@ -3982,6 +3982,83 @@ async def trackcheck_cmd(ctx: commands.Context) -> None:
     await ctx.send("\n".join(lines))
 
 
+@bot.command(name="ladderstatus", aliases=["laddercheck"])
+async def ladder_status_cmd(ctx: commands.Context, message_ref: str = "") -> None:
+    """Check a ladder privately in a commands channel."""
+    if ctx.guild is None:
+        return
+    match = re.search(r"(\d{15,22})/?$", message_ref.strip())
+    if not match:
+        await ctx.send("Use bt!ladderstatus followed by the original Discord message ID or link.")
+        return
+    source_id = int(match.group(1))
+    source = cur.execute(
+        """SELECT channel_id, capper_user_id, rung_count FROM ladder_sources
+           WHERE guild_id = ? AND source_message_id = ?""",
+        (ctx.guild.id, source_id),
+    ).fetchone()
+    if not source:
+        await ctx.send("No tracked ladder found for that message in this server.")
+        return
+    channel_id, owner_id, expected = (int(x) for x in source)
+    allowed = authorized_to_grade(ctx.author.id, owner_id) or bool(
+        getattr(ctx.author.guild_permissions, "manage_guild", False)
+    )
+    if not allowed:
+        await ctx.send("Only the capper or an authorized manager can view this ladder.")
+        return
+    ids = ladder_rung_ids(source_id)
+    if len(ids) != expected:
+        await ctx.send("⚠️ Incomplete ladder storage; ask a tracker administrator.")
+        return
+    jump = "https://discord.com/channels/{}/{}/{}".format(
+        ctx.guild.id, channel_id, source_id
+    )
+    lines = [
+        "🪜 **Ladder Status** · {} separately tracked wagers".format(len(ids)),
+        "[Original post]({})".format(jump),
+    ]
+    wins = losses = pending = 0
+    net = 0.0
+    for index, mid in enumerate(ids, 1):
+        row = cur.execute(
+            "SELECT content, risk_units, odds_text FROM pending WHERE message_id=?", (mid,)
+        ).fetchone()
+        if row:
+            label, marker = "Pending", "📝"
+            pending += 1
+        else:
+            row = cur.execute(
+                "SELECT content, risk_units, odds_text, result, net_units "
+                "FROM bets WHERE message_id=?", (mid,),
+            ).fetchone()
+            if not row:
+                lines.append("{}. ⚠️ Missing wager record".format(index))
+                continue
+            label = str(row[3]).capitalize()
+            marker = {"Win": "✅", "Loss": "❌", "Push": "➖", "Void": "↩️"}.get(
+                label, "📌"
+            )
+            wins += int(label == "Win")
+            losses += int(label == "Loss")
+            net += float(row[4])
+        content = str(row[0])
+        play = next(
+            (line.strip() for line in content.splitlines()
+             if parse_risk_units(line) is not None),
+            content.splitlines()[-1],
+        ).replace("🪜", "").strip()
+        if len(play) > 105:
+            play = play[:102] + "..."
+        lines.append("{}. {} {} · {}".format(index, marker, play, label))
+    lines.extend([
+        "**Wins:** {} | **Losses:** {} | **Pending:** {} | "
+        "**Graded net:** {:+.2f}u".format(wins, losses, pending, net),
+        "Base: ✅/❌ · Extras: 1️⃣–7️⃣ · 🏁 marks remaining ungraded rungs lost.",
+    ])
+    await ctx.send("\n".join(lines))
+
+
 @bot.command(name="format", aliases=["template", "postformat"])
 async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
     today = now_local().date()

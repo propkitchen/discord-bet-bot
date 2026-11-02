@@ -3532,7 +3532,7 @@ async def on_message(message: discord.Message) -> None:
         await track_ladder_post(message, capper)
         await bot.process_commands(message)
         return
-     if parse_risk_units(content) is None:
+    if parse_risk_units(content) is None:
         if looks_like_wager_message(message, content):
             await send_temporary_notice(
                 message,

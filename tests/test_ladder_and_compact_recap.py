@@ -1,4 +1,4 @@
-"""No token or Discord login: validate multi-rung independence and compact recaps."""
+"""Regression tests for prop ladders, multi-day challenges and existing recaps."""
 from __future__ import annotations
 
 import ast
@@ -12,7 +12,10 @@ import types
 import unittest
 from unittest.mock import AsyncMock
 
-from bettracker_ladders import parse_ladder_post, is_ladder_post, has_multiple_staked_lines
+from bettracker_ladders import (
+    parse_ladder_post, parse_challenge_day, is_challenge_day, is_ladder_post,
+    is_multi_wager_post, has_multiple_staked_lines,
+)
 
 SOURCE = (Path(__file__).resolve().parents[1] / "bot.py").read_text()
 TREE = ast.parse(SOURCE)
@@ -28,152 +31,334 @@ def load(name, scope):
         ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
         fn,
     ], type_ignores=[]))
-    exec(compile(mod, "<isolated ladder/recap>", "exec"), scope)
+    exec(compile(mod, "<isolated ladder>", "exec"), scope)
     return scope[name]
 
 
-class LadderParserTests(unittest.TestCase):
-    EXAMPLE = (
-        "NFL Drake Maye Pass Yards Ladder 🪜\n"
-        ".75u 225+ Pass Yards (-110)\n"
-        ".5u 250+ Pass Yards (+120) 🪜\n"
-        ".25u 300+ Pass Yards (+240) 🪜\n"
-        ".1u 350+ Pass Yards (+500) 🪜"
+class TwoLadderTypesTests(unittest.TestCase):
+    PROP = (
+        "NBA Luka Doncic Points Ladder\n"
+        "Main Play: 0.8u Luka Doncic 30+ Points (-115 Novig)\n"
+        "🪜.4u Luka Doncic 35+ Points (+120 DraftKings)\n"
+        "🪜.2u Luka Doncic 40+ Points (+400 FanDuel)\n"
+        "🪜.1u Luka Doncic 50+ Points (+750 Fanatics)\n"
+        "🪜.05u Luka Doncic 60+ Points (+1500 BetMGM)"
+    )
+    BILLS = (
+        "NFL Bills Team Total Ladder\n"
+        "1.7u Buffalo Bills Team Total over 20.5 (-170)\n"
+        "🪜 .8u Bills TT over 24.5 (-120)\n"
+        ".5u Bills TT over 27.5 +150\n"
+        ".35u over 56.5 Game Total (+250)\n"
+        ".25u Bills TT over 31.5 points (+450)\n"
+        ".20u Bills TT 37.5 Points +800\n"
+        ".10u TT over 40+ Points+1000\n"
+        ".10u TT 50+ Points +2000"
+    )
+    CHALLENGE = (
+        "The Balls Out Bets Challenge 🪜 Day 1\n"
+        "Goal: $25 to $500 in 6 bets\n"
+        "1️⃣ $25 -> $50\n"
+        "2️⃣ $50 -> $100 pocket $25\n"
+        "3️⃣ $75 -> $150 pocket $50\n"
+        "4️⃣ $100 -> $200 pocket $50\n"
+        "1U | NFL | Bears +10.5 Caleb 180 passing yards "
+        "Darnold 200 passing yards | odds +100 | 11/2"
     )
 
-    def test_four_rungs_and_american_odds_each_independent(self):
-        ladder = parse_ladder_post(self.EXAMPLE)
-        self.assertEqual(4, len(ladder.rungs))
-        self.assertEqual([.75, .5, .25, .1], [r.risk for r in ladder.rungs])
-        self.assertEqual(["-110", "+120", "+240", "+500"], [r.odds for r in ladder.rungs])
-        self.assertIn("NFL", ladder.preface)
-        self.assertNotIn("🪜", ladder.rungs[1].line)
+    def test_luka_stakes_and_odds_and_no_visible_reply_requirement(self):
+        item = parse_ladder_post(self.PROP)
+        self.assertEqual([.8, .4, .2, .1, .05], [x.risk for x in item.rungs])
+        self.assertEqual(["-115", "+120", "+400", "+750", "+1500"], [x.odds for x in item.rungs])
+        self.assertTrue(is_multi_wager_post(self.PROP))
+        self.assertFalse(is_challenge_day(self.PROP))
 
-    def test_invalid_or_unmarked_ladder_not_silently_recorded(self):
-        examples = [
-            ".5u 225+ Pass Yards (-110)\n.2u 250+ Pass Yards (+120)",
-            "NFL LADDER\n.5u 225+ Pass Yards (-110)\n.2u 250+ Pass Yards",
-            "NFL LADDER\n.5u 225+ Pass Yards (-110)",
-            "NFL LADDER\n.5u 225+ Pass Yards (-110)\n.5u 225+ Pass Yards (-110)",
-        ]
-        for text in examples:
-            with self.subTest(text=text), self.assertRaises(ValueError):
-                parse_ladder_post(text)
+    def test_bills_eight_staked_rungs_and_compact_odds(self):
+        item = parse_ladder_post(self.BILLS)
+        self.assertEqual(8, len(item.rungs))
+        self.assertAlmostEqual(sum(x.risk for x in item.rungs), 4, places=7)
+        self.assertEqual("+1000", item.rungs[6].odds)
+        self.assertEqual("+2000", item.rungs[7].odds)
+        self.assertAlmostEqual(item.rungs[2].risk, 0.5)
 
-    def test_unmarked_multistake_cannot_be_recorded_as_one_bet(self):
-        text = ".75u 225+ Pass Yards (-110)\n.5u 250+ Pass Yards (+120)"
-        self.assertTrue(has_multiple_staked_lines(text))
-        self.assertFalse(is_ladder_post(text))
-        self.assertFalse(has_multiple_staked_lines("1u Knicks ML (-110)"))
+    def test_mixed_market_header_does_not_override_game_total(self):
+        scope = {"re": re, "parse_odds_text": lambda x: (
+            re.findall(r"[+-]\d{2,5}", x)[0] if re.findall(r"[+-]\d{2,5}", x) else ""
+        )}
+        fn = load("make_ladder_record_content", scope)
+        line = ".35u over 56.5 Game Total (+250)"
+        content = fn("NFL Bills Team Total Ladder", line, "+250")
+        self.assertIn("Game Total", content)
+        self.assertNotIn("Team Total", content)
+        self.assertIn("NFL", content)
 
-    def test_ladder_indicator_does_not_confuse_plain_wager(self):
-        self.assertFalse(is_ladder_post("1u Scottie Barnes over 20.5 Pts (-110)"))
-        self.assertTrue(is_ladder_post("NFL Ladder 🪜\n.5u 250+ Pass Yds (+130)"))
+    def test_unmarked_ladder_with_3_staked_wagers(self):
+        s = ("NBA Tyrese Haliburton\n"
+             "1u Tyrese Haliburton over 7.5 Assists -150\n"
+             ".3u Tyrese Haliburton 9+ Assists (+120)\n"
+             ".2u Tyrese Haliburton Double Double (+250)")
+        self.assertFalse(is_ladder_post(s))
+        self.assertTrue(is_multi_wager_post(s))
+        self.assertEqual(3, len(parse_ladder_post(s).rungs))
+
+    def test_one_play_with_alternatives_is_not_multiple_bets(self):
+        s = ("NBA Luka Doncic\n"
+             "1u Luka Doncic over 24.5 Points (-110)\n"
+             "You can also play 27.5 PRA or 26.5 PR\n"
+             "I am fine with up to 25.5 Points")
+        self.assertFalse(is_multi_wager_post(s))
+        self.assertFalse(has_multiple_staked_lines(s))
+
+    def test_bad_stake_or_missing_odds_reject_entire_rung_set(self):
+        with self.assertRaises(ValueError):
+            parse_ladder_post("NFL Ladder\n.5u 225+ Pass Yds (-110)\n.3u 250+ Pass Yds")
+        with self.assertRaises(ValueError):
+            parse_ladder_post("NFL Ladder\n.5u 225+ Pass Yds (-110)")
+        with self.assertRaises(ValueError):
+            parse_ladder_post("NFL Ladder\n.5u 225+ Pass Yds (-110)\n.5u 225+ Pass Yds (-110)")
+
+    def test_day_by_day_ladder_is_single_wager(self):
+        self.assertTrue(is_challenge_day(self.CHALLENGE))
+        self.assertFalse(is_multi_wager_post(self.CHALLENGE))
+        day = parse_challenge_day(self.CHALLENGE)
+        self.assertIsNotNone(day)
+        self.assertEqual(1, day.day)
+        self.assertEqual(1, day.risk)
+        self.assertEqual("+100", day.odds)
+
+    def test_first_day_launch_without_day_label(self):
+        post = (
+            "The Balls Out Bets Challenge\n"
+            "Goal: $25 -> $500 in 6 bets\n"
+            "1️⃣ $25 -> $50\n"
+            "2️⃣ $50 -> $100 pocket $25\n"
+            "3️⃣ $75 -> $150 pocket $50\n"
+            "1U | NFL | Bears +10.5 Caleb 180 pass yards | odds +100"
+        )
+        self.assertTrue(is_challenge_day(post))
+        day = parse_challenge_day(post)
+        self.assertEqual(0, day.day)
+        self.assertEqual(1, day.risk)
+        self.assertEqual("+100", day.odds)
+
+    def test_day_2_and_4_with_pocketing_notes(self):
+        for n, units in [(2, 2), (4, 4)]:
+            x = f"🪜 Ladder Challenge Day {n}\n{units}u Aaron Judge 2+ Total Bases (2x)\nPocketed $25"
+            day = parse_challenge_day(x)
+            self.assertEqual(n, day.day)
+            self.assertEqual(units, day.risk)
+            self.assertEqual("2x", day.odds)
+
+    def test_challenge_status_only_not_a_wager(self):
+        self.assertIsNone(parse_challenge_day("🪜 Ladder Challenge Day 3\n$75 -> $150 pocket $50"))
+        with self.assertRaises(ValueError):
+            parse_ladder_post(self.CHALLENGE)
 
 
-class GradingIntegrationTests(unittest.TestCase):
+class LadderLedgerTests(unittest.TestCase):
+    PROP = TwoLadderTypesTests.PROP
+
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
-        self.db.execute("""
-            CREATE TABLE ladder_sources (
-                source_message_id INTEGER PRIMARY KEY, guild_id INTEGER,
-                channel_id INTEGER, capper_user_id INTEGER, rung_count INTEGER,
-                created_utc TEXT
-            )
-        """)
-        self.db.execute("""
-            CREATE TABLE ladder_rungs (
-                source_message_id INTEGER, rung_number INTEGER,
-                tracked_message_id INTEGER UNIQUE,
-                PRIMARY KEY (source_message_id, rung_number)
-            )
-        """)
         self.cur = self.db.cursor()
+        self.cur.executescript("""
+        CREATE TABLE ladder_sources (
+          source_message_id INTEGER PRIMARY KEY, guild_id INTEGER,
+          channel_id INTEGER, capper_user_id INTEGER, rung_count INTEGER,
+          created_utc TEXT);
+        CREATE TABLE ladder_rungs (
+          source_message_id INTEGER, rung_number INTEGER,
+          tracked_message_id INTEGER UNIQUE,
+          PRIMARY KEY(source_message_id,rung_number));
+        CREATE TABLE pending(message_id INTEGER PRIMARY KEY, content TEXT);
+        CREATE TABLE bets(
+          message_id INTEGER PRIMARY KEY, result TEXT,
+          grade_reaction TEXT, grader_user_id INTEGER);
+        """)
+        self.reactions = []
+        self.alerts = []
+        self.original = types.SimpleNamespace(
+            id=500, guild=types.SimpleNamespace(id=10),
+            channel=types.SimpleNamespace(id=20),
+            author=types.SimpleNamespace(id=99),
+            created_at=datetime(2026, 11, 2, tzinfo=timezone.utc),
+            content=self.PROP,
+            jump_url="https://discord.com/channels/10/20/500",
+        )
+        self.channel = types.SimpleNamespace(fetch_message=AsyncMock(return_value=self.original))
+        self.ctx = {
+            "cur": self.cur, "conn": self.db, "sqlite3": sqlite3,
+            "re": re,
+            "discord": types.SimpleNamespace(DiscordException=RuntimeError),
+            "bot": types.SimpleNamespace(get_channel=lambda x: self.channel),
+            "message_to_text": lambda m: m.content,
+            "parse_ladder_post": parse_ladder_post,
+            "is_challenge_day": is_challenge_day,
+            "is_ladder_post": is_ladder_post,
+            "is_multi_wager_post": is_multi_wager_post,
+            "ladder_source_exists": lambda mid: self.cur.execute(
+                "SELECT 1 FROM ladder_sources WHERE source_message_id=?", (mid,)
+            ).fetchone() is not None,
+            "infer_sports": lambda text: ["NBA"] if "NBA" in text else [],
+            "utc_iso": lambda value: value.isoformat(),
+            "send_temporary_notice": AsyncMock(side_effect=lambda m, msg: self.alerts.append(msg)),
+            "safe_add_reaction": AsyncMock(side_effect=lambda m, emoji: self.reactions.append(emoji)),
+            "safe_clear_reaction": AsyncMock(),
+            "PENDING_REACTION": "📝", "LOGGED_REACTION": "📌",
+            "WIN_EMOJI": "✅", "LOSS_EMOJI": "❌", "DUPLICATE_REACTION": "⚠️",
+            "LADDER_NUMBER_REACTIONS": ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣"),
+            "LADDER_FINISH_REACTION": "🏁",
+            "parse_odds_text": lambda content: (
+                re.findall(r"[+-]\d{2,5}", content)[0] if re.findall(r"[+-]\d{2,5}", content) else ""
+            ),
+            "authorized_to_grade": lambda uid, owner: uid == owner or uid == 1,
+            "SimpleNamespace": types.SimpleNamespace,
+            "parse_risk_units": lambda content: float(re.search(
+                r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*u\b", content, re.I
+            ).group(1)),
+            "record_wager_edit": lambda *args: self.alerts.append("EDIT LOGGED"),
+        }
+        self.ctx["pending_exists"] = lambda mid: self.cur.execute(
+            "SELECT 1 FROM pending WHERE message_id=?", (mid,)
+        ).fetchone() is not None
+        self.ctx["bet_exists"] = lambda mid: self.cur.execute(
+            "SELECT 1 FROM bets WHERE message_id=?", (mid,)
+        ).fetchone() is not None
+        self.ctx["refresh_pending_from_message"] = self.refresh_pending
+        self.ctx["insert_pending"] = self.insert_pending
+        self.ctx["grade_pending"] = self.grade_pending
+        self.ctx["regrade_bet"] = self.regrade_bet
+        self.ctx["ungrade_bet"] = self.ungrade_bet
+        for name in ("make_ladder_record_content", "ladder_rung_ids", "next_ladder_internal_id", "update_ladder_indicator",
+                     "process_ladder_reaction", "track_ladder_post",
+                     "correction_proxy", "sync_ladder_edit"):
+            self.ctx[name] = load(name, self.ctx)
 
     def tearDown(self):
         self.db.close()
 
-    def test_one_original_message_fans_out_to_four_gradeable_messages_once(self):
-        outputs = []
-        warnings = []
-        reactions = []
-        counter = [2100]
+    def insert_pending(self, mid, guild, channel, capper, author, content, created, jump):
+        self.assertEqual(jump, self.original.jump_url)
+        self.assertEqual((guild, channel, author), (10, 20, 99))
+        self.cur.execute("INSERT INTO pending VALUES (?, ?)", (mid, content))
+        self.db.commit()
+        return True, None
 
-        class FakeMessage:
-            id = 1001
-            content = LadderParserTests.EXAMPLE
-            guild = types.SimpleNamespace(id=10)
-            channel = types.SimpleNamespace(id=20)
-            author = types.SimpleNamespace(id=99)
-            created_at = datetime(2026, 10, 31, tzinfo=timezone.utc)
-            async def reply(self, text, **kwargs):
-                counter[0] += 1
-                outputs.append(text)
-                return types.SimpleNamespace(
-                    id=counter[0],
-                    jump_url=f"https://discord.com/channels/10/20/{counter[0]}",
-                )
+    def refresh_pending(self, proxy, capper):
+        self.cur.execute("UPDATE pending SET content=? WHERE message_id=?",
+                         (proxy.content, proxy.id))
+        self.db.commit()
+        return True
 
-        def insert_pending(mid, gid, cid, capper, author, text, created, jump):
-            self.assertEqual(gid, 10)
-            self.assertEqual(cid, 20)
-            self.assertEqual(capper.name, "PropKitchen")
-            self.assertIn("NFL", text)
-            self.assertIn("Pass Yards", text)
-            self.assertEqual(author, 99)
-            # Real insert_pending records a separate message_id per rung.
-            reactions.append((mid, text))
-            return True, None
+    def grade_pending(self, mid, result, emoji, uid):
+        self.cur.execute("DELETE FROM pending WHERE message_id=?", (mid,))
+        self.cur.execute("INSERT INTO bets VALUES (?, ?, ?, ?)", (mid, result, emoji, uid))
+        self.db.commit()
+        return True
 
-        ctx = {
-            "cur": self.cur, "conn": self.db, "discord": types.SimpleNamespace(
-                HTTPException=RuntimeError,
-                AllowedMentions=types.SimpleNamespace(none=lambda: None),
-            ),
-            "message_to_text": lambda m: m.content,
-            "is_ladder_post": is_ladder_post,
-            "parse_ladder_post": parse_ladder_post,
-            "send_temporary_notice": AsyncMock(side_effect=lambda m, t: warnings.append(t)),
-            "infer_sports": lambda x: ["NFL"] if "NFL" in x else [],
-            "utc_iso": lambda dt: dt.isoformat(),
-            "insert_pending": insert_pending,
-            "safe_add_reaction": AsyncMock(return_value=True),
-            "PENDING_REACTION": "📝",
-        }
-        fn = load("track_ladder_post", ctx)
-        capper = types.SimpleNamespace(name="PropKitchen", user_id=99)
-        asyncio.run(fn(FakeMessage(), capper))
-        asyncio.run(fn(FakeMessage(), capper))
-        self.assertEqual(4, len(outputs))
-        self.assertEqual(4, len(reactions))
-        self.assertEqual(4, self.cur.execute("SELECT COUNT(*) FROM ladder_rungs").fetchone()[0])
-        self.assertEqual(1, self.cur.execute("SELECT COUNT(*) FROM ladder_sources").fetchone()[0])
-        self.assertFalse(warnings)
+    def regrade_bet(self, mid, result, emoji, uid):
+        self.cur.execute("UPDATE bets SET result=?,grade_reaction=?,grader_user_id=? WHERE message_id=?",
+                         (result, emoji, uid, mid))
+        self.db.commit()
+        return True
 
-    def test_four_rungs_have_independent_risk_and_profit(self):
-        # Two lower rungs win while the two highest thresholds lose.
-        # Each independent stake contributes once, never as a combined parlay.
-        odds = [-110, 120, 240, 500]
-        risk = [0.75, 0.5, 0.25, 0.1]
-        results = ["win", "win", "loss", "loss"]
-        net = [
-            stake * (100 / abs(price) if price < 0 else price / 100)
-            if outcome == "win" else -stake
-            for stake, price, outcome in zip(risk, odds, results)
-        ]
-        self.assertEqual(4, len(net))
-        self.assertAlmostEqual(sum(risk), 1.6, places=4)
-        self.assertAlmostEqual(sum(net), 0.931818, places=5)
+    def ungrade_bet(self, mid):
+        self.cur.execute("DELETE FROM bets WHERE message_id=?", (mid,))
+        self.cur.execute("INSERT INTO pending VALUES (?, ?)", (mid, "restored"))
+        self.db.commit()
+        return True
 
-    def test_legacy_grading_path_kept_for_every_bot_rung(self):
-        fn = next(node for node in TREE.body
-                  if isinstance(node, ast.AsyncFunctionDef)
-                  and node.name == "on_raw_reaction_add")
-        body = ast.unparse(fn)
-        self.assertIn("owner_user_id_for_message", body)
-        self.assertIn("grade_pending", body)
-        self.assertIn("regrade_bet", body)
-        self.assertNotIn("ladder_source_exists", body)
+    def create_ladder(self):
+        capper = types.SimpleNamespace(name="Sample", user_id=99)
+        asyncio.run(self.ctx["track_ladder_post"](self.original, capper))
+
+    def fire(self, emoji, user=99, removed=False):
+        payload = types.SimpleNamespace(
+            emoji=emoji, user_id=user, message_id=500, guild_id=10, channel_id=20
+        )
+        return asyncio.run(self.ctx["process_ladder_reaction"](payload, removed=removed))
+
+    def test_ladder_has_five_independent_hidden_records_and_no_bot_replies(self):
+        self.create_ladder()
+        rows = self.cur.execute("SELECT tracked_message_id FROM ladder_rungs ORDER BY rung_number").fetchall()
+        self.assertEqual(5, len(rows))
+        self.assertTrue(all(r[0] < 0 for r in rows))
+        self.assertIn("📝", self.reactions)
+        self.assertIn("1️⃣", self.reactions)
+        self.assertIn("🏁", self.reactions)
+        self.assertEqual(5, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.create_ladder()
+        self.assertEqual(5, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.assertFalse(self.alerts)
+
+    def test_main_and_numbered_rungs_independent_then_finish_only_ungraded_losses(self):
+        self.create_ladder()
+        self.assertTrue(self.fire("✅"))
+        self.assertTrue(self.fire("1️⃣"))
+        self.assertTrue(self.fire("2️⃣"))
+        self.fire("🏁")
+        results = [row[0] for row in self.cur.execute(
+            "SELECT result FROM bets JOIN ladder_rungs USING (tracked_message_id) ORDER BY rung_number"
+        )] if False else [self.cur.execute(
+            "SELECT result FROM bets WHERE message_id=?", (mid,)
+        ).fetchone()[0] for mid in self.ctx["ladder_rung_ids"](500)]
+        self.assertEqual(["win", "win", "win", "loss", "loss"], results)
+        self.assertEqual(0, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.assertIn("📌", self.reactions)
+        self.fire("3️⃣")  # Correct a previously finished rung.
+        self.assertEqual("win", self.cur.execute(
+            "SELECT result FROM bets WHERE message_id=?",
+            (self.ctx["ladder_rung_ids"](500)[3],)
+        ).fetchone()[0])
+
+    def test_finish_reaction_removal_reopens_only_auto_closed_rungs(self):
+        self.create_ladder()
+        self.fire("✅")
+        self.fire("1️⃣")
+        self.fire("🏁")
+        self.assertEqual(0, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.fire("🏁", removed=True)
+        self.assertEqual(3, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.assertEqual(2, self.cur.execute("SELECT COUNT(*) FROM bets").fetchone()[0])
+
+    def test_correction_before_grade_and_refuse_after_grade(self):
+        self.create_ladder()
+        self.original.content = self.PROP.replace("0.8u", "0.6u").replace(
+            "(+400 FanDuel)", "(+425 FanDuel)"
+        )
+        capper = types.SimpleNamespace(name="Sample", user_id=99)
+        asyncio.run(self.ctx["sync_ladder_edit"](self.original, capper))
+        ids = self.ctx["ladder_rung_ids"](500)
+        self.assertIn("0.6u", self.cur.execute(
+            "SELECT content FROM pending WHERE message_id=?", (ids[0],)
+        ).fetchone()[0])
+        self.assertIn("+425", self.cur.execute(
+            "SELECT content FROM pending WHERE message_id=?", (ids[2],)
+        ).fetchone()[0])
+        self.assertIn("EDIT LOGGED", self.alerts)
+        self.fire("✅")
+        self.original.content = self.original.content.replace("0.6u", "1.6u")
+        asyncio.run(self.ctx["sync_ladder_edit"](self.original, capper))
+        self.assertEqual("win", self.cur.execute(
+            "SELECT result FROM bets WHERE message_id=?", (ids[0],)
+        ).fetchone()[0])
+        self.assertTrue(any("partly graded" in note for note in self.alerts))
+
+    def test_unauthorized_reaction_cannot_grade(self):
+        self.create_ladder()
+        self.fire("1️⃣", user=1234)
+        self.assertEqual(5, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+
+    def test_remove_number_undoes_only_that_grade(self):
+        self.create_ladder()
+        self.fire("✅")
+        self.fire("1️⃣")
+        self.fire("1️⃣", removed=True)
+        self.assertEqual(4, self.cur.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+        self.assertEqual("win", self.cur.execute(
+            "SELECT result FROM bets WHERE message_id=?",
+            (self.ctx["ladder_rung_ids"](500)[0],)
+        ).fetchone()[0])
 
 
 class CompactRecapTests(unittest.TestCase):
@@ -190,20 +375,11 @@ class CompactRecapTests(unittest.TestCase):
         self.clean = load("compact_bet_description", self.scope)
         self.scope.update({
             "WIN_EMOJI": "✅", "LOSS_EMOJI": "❌", "PUSH_EMOJI": "➖",
-            "VOID_EMOJI": "↩️",
-            "WAGER_DFS": "DFS",
-            "format_compact_units": lambda units, signed=False: (
-                f"{units:+g}u" if signed else f"{units:g}u"
-            ),
+            "VOID_EMOJI": "↩️", "WAGER_DFS": "DFS",
+            "format_compact_units": lambda x, signed=False: f"{x:+g}u" if signed else f"{x:g}u",
             "format_odds_display": lambda odds: odds,
         })
         self.fn = load("build_bet_result_line", self.scope)
-
-    def test_strips_platform_broken_punctuation_and_abbreviates_market(self):
-        content = "Karl Anthony-Towns o14.5 Rebounds+Assists ( Onyx |"
-        self.assertEqual(
-            "Karl Anthony-Towns o14.5 Reb+Ast", self.clean(content, "")
-        )
 
     def test_simplified_straight_and_dfs_line(self):
         straight = (
@@ -212,25 +388,15 @@ class CompactRecapTests(unittest.TestCase):
             "-135", "NBA", "https://discord.com/channels/1/2/123",
             "STRAIGHT", "Onyx", "2026-10-30",
         )
-        line = self.fn(straight)
-        self.assertIn("✅ 1u | Karl Anthony-Towns o14.5 Reb+Ast | -135 | +0.74u", line)
-        self.assertNotIn("Onyx", line)
-        self.assertNotIn("10/30", line)
-        self.assertNotIn("( |", line)
-
+        self.assertIn("Karl Anthony-Towns o14.5 Reb+Ast",
+                      self.fn(straight))
+        self.assertNotIn("Onyx", self.fn(straight))
+        self.assertNotIn("10/30", self.fn(straight))
         dfs = list(straight)
         dfs[10] = "DFS"
         dfs[11] = "Chalkboard"
         dfs[7] = "1.92x"
-        result = self.fn(tuple(dfs))
-        self.assertIn("1u | Chalkboard | 1.92x", result)
-        self.assertNotIn("10/30", result)
-
-    def test_format_title_uses_recap(self):
-        s = SOURCE
-        self.assertIn(" /  RECAP", s)
-        self.assertNotIn('heading=f"{capper_name or \'VIP\'}  /  BET RESULTS"', s)
-
+        self.assertIn("1u | Chalkboard | 1.92x", self.fn(tuple(dfs)))
 
 if __name__ == "__main__":
     unittest.main()

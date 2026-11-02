@@ -16,7 +16,7 @@ LEADING_UNITS = re.compile(
     rf"(?i)^\s*{PREFIX}{LABEL}{PREFIX}(?P<risk>{STAKE})\s*u\b"
 )
 UNITS = re.compile(rf"(?i)(?<![\w.]){STAKE}\s*u\b")
-ODDS = re.compile(r"(?i)(?<![\w.])(?P<american>[+-]\d{2,5})(?![\d.])")
+ODDS = re.compile(r"(?i)(?<![\d.])(?P<american>[+-]\d{2,5})(?![\d.])")
 MULTIPLIER = re.compile(r"(?i)(?<![\w.])(?P<multiplier>\d+(?:\.\d+)?x)\b")
 LADDER_MARKER = re.compile(r"(?i)(?<![A-Z0-9])LADDER(?![A-Z0-9])")
 DAY_MARKER = re.compile(r"(?i)\b(?:ladder\s*)?(?:challenge\s*)?day\s*#?\s*(\d{1,2})\b")

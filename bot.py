@@ -3396,6 +3396,24 @@ async def process_ladder_reaction(
     return True
 
 
+def make_ladder_record_content(preface: str, rung_line: str, expected_odds: str) -> str:
+    """Carry sport/player context without forcing every leg into one market.
+
+    A game-total or double-double rung is distinct from the base team-total
+    or points market. The header must not override that separate proposition.
+    """
+    context = re.sub(r"(?i)\bLADDER\b", "", preface).strip()
+    if re.search(r"(?i)\b(?:GAME\s+TOTAL|DOUBLE\s+DOUBLE|TRIPLE\s+DOUBLE)\b", rung_line):
+        context = re.sub(
+            r"(?i)\b(?:TEAM\s+TOTAL|GAME\s+TOTAL|POINTS|REBOUNDS|ASSISTS)\b",
+            "", context,
+        ).strip()
+    content = (context + "\n" + rung_line).strip()
+    if parse_odds_text(content) != expected_odds:
+        content += f"\nOdds: ({expected_odds})"
+    return content
+
+
 async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
     """One original message and multiple independent DB records; no extra posts."""
     content = message_to_text(message)
@@ -3421,12 +3439,9 @@ async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
         first_id = next_ladder_internal_id()
         for rung in ladder.rungs:
             mid = first_id - (rung.number - 1)
-            content_for_rung = (ladder.preface + "\n" + rung.line).strip()
-            # Some cappers omit a space between market and odds (Points+1000).
-            # The parser recognizes that price; keep it unambiguous for the
-            # existing pending/graded odds engine as well.
-            if parse_odds_text(content_for_rung) != rung.odds:
-                content_for_rung += f"\nOdds: ({rung.odds})"
+            content_for_rung = make_ladder_record_content(
+                ladder.preface, rung.line, rung.odds
+            )
             inserted, _duplicate = insert_pending(
                 mid, message.guild.id, message.channel.id, capper,
                 message.author.id, content_for_rung, timestamp, message.jump_url,
@@ -3537,9 +3552,9 @@ async def sync_ladder_edit(message: discord.Message, capper: Capper) -> None:
         return
     new_contents = []
     for rung in updated.rungs:
-        content = (updated.preface + "\n" + rung.line).strip()
-        if parse_odds_text(content) != rung.odds:
-            content += f"\nOdds: ({rung.odds})"
+        content = make_ladder_record_content(
+            updated.preface, rung.line, rung.odds
+        )
         if parse_risk_units(content) != rung.risk or parse_odds_text(content) != rung.odds:
             await send_temporary_notice(message, "⚠️ Ladder edit not saved: "
                                         "odds or stakes could not be verified.")

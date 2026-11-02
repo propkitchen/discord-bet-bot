@@ -53,6 +53,7 @@ from bettracker_ladders import (has_multiple_staked_lines, is_ladder_post,
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from types import SimpleNamespace
 
 import discord
 from bettracker_sports import infer_sports_from_text
@@ -524,6 +525,18 @@ def ensure_schema() -> None:
             rung_number INTEGER NOT NULL,
             tracked_message_id INTEGER NOT NULL UNIQUE,
             PRIMARY KEY (source_message_id, rung_number)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS wager_edit_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            source_message_id INTEGER NOT NULL,
+            capper_user_id INTEGER NOT NULL,
+            wager_kind TEXT NOT NULL,
+            old_content TEXT NOT NULL,
+            new_content TEXT NOT NULL,
+            edited_utc TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -3474,6 +3487,112 @@ async def track_challenge_day(message: discord.Message, capper: Capper) -> bool:
     return True
 
 
+def correction_proxy(message: discord.Message, content: str, record_id: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=record_id, content=content, embeds=[], guild=message.guild,
+        author=message.author, created_at=message.created_at,
+        jump_url=message.jump_url,
+    )
+
+
+def record_wager_edit(
+    message: discord.Message, capper: Capper, kind: str,
+    old_text: str, new_text: str,
+) -> None:
+    cur.execute(
+        """INSERT INTO wager_edit_history
+           (guild_id, source_message_id, capper_user_id,
+            wager_kind, old_content, new_content, edited_utc)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (message.guild.id, message.id, capper.user_id,
+         kind, old_text, new_text, utc_iso(datetime.now(timezone.utc))),
+    )
+    conn.commit()
+
+
+async def sync_ladder_edit(message: discord.Message, capper: Capper) -> None:
+    """Allow original-post odds/stake corrections only before ANY rung grades."""
+    ids = ladder_rung_ids(message.id)
+    if not ids or any(mid > 0 for mid in ids):
+        return  # Old reply-based ladders keep their existing grading workflow.
+    if not all(pending_exists(mid) for mid in ids):
+        await send_temporary_notice(
+            message, "🪜 Ladder already graded or partly graded. "
+            "Edits cannot silently change settled results; contact an admin."
+        )
+        return
+    try:
+        updated = parse_ladder_post(message_to_text(message))
+    except ValueError as exc:
+        await send_temporary_notice(message, f"⚠️ Ladder edit not saved: {exc}")
+        return
+    if len(ids) != len(updated.rungs):
+        await send_temporary_notice(message, "⚠️ Ladder edit not saved: "
+                                    "keep the same number of rungs.")
+        return
+    new_contents = []
+    for rung in updated.rungs:
+        content = (updated.preface + "\n" + rung.line).strip()
+        if parse_odds_text(content) != rung.odds:
+            content += f"\nOdds: ({rung.odds})"
+        if parse_risk_units(content) != rung.risk or parse_odds_text(content) != rung.odds:
+            await send_temporary_notice(message, "⚠️ Ladder edit not saved: "
+                                        "odds or stakes could not be verified.")
+            return
+        new_contents.append(content)
+    old_contents = [
+        cur.execute("SELECT content FROM pending WHERE message_id=?", (mid,)).fetchone()[0]
+        for mid in ids
+    ]
+    if new_contents == old_contents:
+        return
+    # Existing refresh_pending_from_message recalculates normalized analytical
+    # columns from the new stake and price. Restore snapshots on any failure.
+    column_names = [x[1] for x in cur.execute("PRAGMA table_info(pending)").fetchall()]
+    original_rows = [
+        cur.execute("SELECT * FROM pending WHERE message_id=?", (mid,)).fetchone()
+        for mid in ids
+    ]
+    try:
+        for mid, content in zip(ids, new_contents):
+            if not refresh_pending_from_message(correction_proxy(message, content, mid), capper):
+                raise ValueError("Could not refresh one pending rung")
+    except Exception as exc:
+        fields = ",".join(column_names)
+        placeholders = ",".join("?" for _ in column_names)
+        for row in original_rows:
+            cur.execute(f"INSERT OR REPLACE INTO pending ({fields}) VALUES ({placeholders})", row)
+        conn.commit()
+        await send_temporary_notice(message, f"⚠️ Ladder edit not saved: {exc}")
+        return
+    record_wager_edit(message, capper, "PROP_LADDER",
+                      "\n".join(old_contents), "\n".join(new_contents))
+
+
+async def sync_challenge_edit(message: discord.Message, capper: Capper) -> None:
+    if not pending_exists(message.id):
+        return
+    try:
+        day = parse_challenge_day(message_to_text(message))
+    except ValueError as exc:
+        await send_temporary_notice(message, f"⚠️ Challenge edit not saved: {exc}")
+        return
+    if day is None:
+        await send_temporary_notice(message, "⚠️ Challenge edit not saved: "
+                                    "a complete wager is required.")
+        return
+    content = message_to_text(message)
+    heading = "\n".join(
+        x for x in content.splitlines()[:10]
+        if not re.search(r"(?i)(?:\d+(?:\.\d+)?u|\$\s*\d+)", x)
+    )[:250]
+    new_text = (heading + "\n" + day.wager).strip()
+    previous = cur.execute("SELECT content FROM pending WHERE message_id=?", (message.id,)).fetchone()
+    if previous and previous[0] != new_text:
+        if refresh_pending_from_message(correction_proxy(message, new_text, message.id), capper):
+            record_wager_edit(message, capper, "BANKROLL_CHALLENGE", previous[0], new_text)
+
+
 # =====================
 # EVENTS
 # =====================
@@ -3578,11 +3697,9 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     if not is_trackable_channel(after.channel.id) or bet_exists(after.id):
         return
     if ladder_source_exists(after.id):
-        await send_temporary_notice(
-            after, "🪜 This ladder already created separately tracked replies. "
-            "Editing the original does not update their odds or stakes. "
-            "Contact an admin to correct a rung.",
-        )
+        capper = resolve_capper_for_message(after)
+        if capper:
+            await sync_ladder_edit(after, capper)
         return
 
     capper = resolve_capper_for_message(after)
@@ -3592,11 +3709,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     content = message_to_text(after)
     if is_challenge_day(content):
         if pending_exists(after.id):
-            # Avoid refreshing a saved challenge bet from rollover math.
-            await send_temporary_notice(
-                after, "🪜 This day's wager was already tracked. To correct "
-                "a posted wager, contact the tracker admin.",
-            )
+            await sync_challenge_edit(after, capper)
         else:
             await track_challenge_day(after, capper)
         return
@@ -3635,8 +3748,7 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
         return
     if not is_trackable_channel(payload.channel_id) or bet_exists(payload.message_id):
         return
-    if ladder_source_exists(payload.message_id):
-        return
+    has_ladder_source = ladder_source_exists(payload.message_id)
 
     channel = bot.get_channel(payload.channel_id)
     if channel is None:
@@ -3652,10 +3764,15 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
     capper = resolve_capper_for_message(message)
     if capper is None:
         return
+    if has_ladder_source:
+        await sync_ladder_edit(message, capper)
+        return
 
     content = message_to_text(message)
     if is_challenge_day(content):
-        if not pending_exists(payload.message_id):
+        if pending_exists(payload.message_id):
+            await sync_challenge_edit(message, capper)
+        else:
             await track_challenge_day(message, capper)
         return
     if is_multi_wager_post(content) or has_multiple_staked_lines(content):

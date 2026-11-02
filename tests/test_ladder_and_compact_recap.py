@@ -83,7 +83,7 @@ class TwoLadderTypesTests(unittest.TestCase):
 
     def test_mixed_market_header_does_not_override_game_total(self):
         scope = {"re": re, "parse_odds_text": lambda x: (
-            re.findall(r"[+-]\\d{2,5}", x)[0] if re.findall(r"[+-]\\d{2,5}", x) else ""
+            re.findall(r"[+-]\d{2,5}", x)[0] if re.findall(r"[+-]\d{2,5}", x) else ""
         )}
         fn = load("make_ladder_record_content", scope)
         line = ".35u over 56.5 Game Total (+250)"
@@ -229,7 +229,7 @@ class LadderLedgerTests(unittest.TestCase):
         self.ctx["grade_pending"] = self.grade_pending
         self.ctx["regrade_bet"] = self.regrade_bet
         self.ctx["ungrade_bet"] = self.ungrade_bet
-        for name in ("ladder_rung_ids", "next_ladder_internal_id", "update_ladder_indicator",
+        for name in ("make_ladder_record_content", "ladder_rung_ids", "next_ladder_internal_id", "update_ladder_indicator",
                      "process_ladder_reaction", "track_ladder_post",
                      "correction_proxy", "sync_ladder_edit"):
             self.ctx[name] = load(name, self.ctx)

@@ -3404,6 +3404,11 @@ async def track_ladder_post(message: discord.Message, capper: Capper) -> bool:
         for rung in ladder.rungs:
             mid = first_id - (rung.number - 1)
             content_for_rung = (ladder.preface + "\n" + rung.line).strip()
+            # Some cappers omit a space between market and odds (Points+1000).
+            # The parser recognizes that price; keep it unambiguous for the
+            # existing pending/graded odds engine as well.
+            if parse_odds_text(content_for_rung) != rung.odds:
+                content_for_rung += f"\nOdds: ({rung.odds})"
             inserted, _duplicate = insert_pending(
                 mid, message.guild.id, message.channel.id, capper,
                 message.author.id, content_for_rung, timestamp, message.jump_url,
@@ -3527,16 +3532,7 @@ async def on_message(message: discord.Message) -> None:
         await track_ladder_post(message, capper)
         await bot.process_commands(message)
         return
-    if has_multiple_staked_lines(content):
-        await send_temporary_notice(
-            message,
-            "⚠️ **Multiple wagers found in one message, none tracked.** "
-            "For a ladder, add LADDER or 🪜 and a league in the heading. "
-            "Otherwise post each bet separately to grade it independently.",
-        )
-        return
-
-    if parse_risk_units(content) is None:
+     if parse_risk_units(content) is None:
         if looks_like_wager_message(message, content):
             await send_temporary_notice(
                 message,

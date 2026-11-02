@@ -81,6 +81,17 @@ class TwoLadderTypesTests(unittest.TestCase):
         self.assertEqual("+2000", item.rungs[7].odds)
         self.assertAlmostEqual(item.rungs[2].risk, 0.5)
 
+    def test_mixed_market_header_does_not_override_game_total(self):
+        scope = {"re": re, "parse_odds_text": lambda x: (
+            re.findall(r"[+-]\\d{2,5}", x)[0] if re.findall(r"[+-]\\d{2,5}", x) else ""
+        )}
+        fn = load("make_ladder_record_content", scope)
+        line = ".35u over 56.5 Game Total (+250)"
+        content = fn("NFL Bills Team Total Ladder", line, "+250")
+        self.assertIn("Game Total", content)
+        self.assertNotIn("Team Total", content)
+        self.assertIn("NFL", content)
+
     def test_unmarked_ladder_with_3_staked_wagers(self):
         s = ("NBA Tyrese Haliburton\n"
              "1u Tyrese Haliburton over 7.5 Assists -150\n"

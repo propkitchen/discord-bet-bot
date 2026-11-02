@@ -3936,7 +3936,7 @@ async def version_cmd(ctx: commands.Context) -> None:
         "**BetTracker Live Build**\n"
         f"Branch: `{branch}`\n"
         f"Commit: `{commit}`\n"
-        "Release: **November 2026 + report diagnostics**"
+        "Release: **Ladder v2 development (Nov 2026)**"
     )
 
 
@@ -4097,7 +4097,20 @@ async def format_cmd(ctx: commands.Context, wager_type: str = "") -> None:
         ),
     }
     if key in templates:
-        await ctx.send(f"🧾 **{key.upper()} FORMAT**\n{templates[key]}")
+        guidance = ""
+        if key == "ladder":
+            guidance = (
+                "\n\n**Grading:** ✅/❌ = first line; 1️⃣ = second; "
+                "2️⃣ = third; etc. 🏁 closes remaining ungraded lines as losses. "
+                "Use bt!ladderstatus with the original post link to review."
+            )
+        elif key == "challenge":
+            guidance = (
+                "\n\n**Grading:** This is ONE regular daily bet. "
+                "React ✅/❌/➖/↩️ to the original post. "
+                "Bankroll rollovers and pocketing do not create extra bets."
+            )
+        await ctx.send(f"🧾 **{key.upper()} FORMAT**\n{templates[key]}{guidance}")
         return
     await ctx.send(
         "🧾 **POSTING FORMATS**\n"

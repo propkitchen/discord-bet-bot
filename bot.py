@@ -27,6 +27,9 @@ Deployment:
 
 from __future__ import annotations
 
+from bettracker_platforms import (detect_platform, recorded_platform, is_moneyball,
+    moneyball_focus, consume_platform, canonical_platform as known_platform)
+
 import csv
 import io
 import os
@@ -297,11 +300,11 @@ def parse_bet_date(text: str, created_utc: str = "") -> str:
 
 
 def bet_date_for_grade(content: str, created_utc: str, existing_bet_date: str = "") -> str:
+    if existing_bet_date:
+        return str(existing_bet_date)
     explicit = parse_bet_date(content, created_utc)
     if explicit:
         return explicit
-    if existing_bet_date:
-        return str(existing_bet_date)
     # No written game date: use the day it was graded/resulted in ET.
     return now_local().date().isoformat()
 
@@ -719,15 +722,7 @@ def infer_league(text: str, sport: str) -> str:
 
 
 def infer_platform(text: str) -> Tuple[str, str]:
-    for platform, aliases in DFS_PLATFORM_RULES:
-        if any(_contains_alias(text, alias) for alias in aliases):
-            return platform, "DFS_APP"
-
-    for platform, aliases in SPORTSBOOK_KEYWORDS:
-        if any(_contains_alias(text, alias) for alias in aliases):
-            return platform, "SPORTSBOOK"
-
-    return "", ""
+    return detect_platform(text)
 
 
 def infer_sportsbook(text: str) -> str:
@@ -2900,29 +2895,8 @@ def grade_pending(
         duplicate_key,
     ) = row
 
-    parsed_risk = parse_risk_units(str(content or ""))
-    if parsed_risk is not None:
-        risk = parsed_risk
-
-    parsed_odds = parse_odds_text(str(content or ""))
-    if parsed_odds:
-        odds_text = parsed_odds
-
-    fields = parse_analytics_fields(str(content or ""), str(odds_text or ""))
-    if str(fields["sport"]) != "UNKNOWN":
-        sport = fields["sport"]
-    league = fields["league"] or league
-    player = fields["player"] or player
-    bet_type = fields["bet_type"] or bet_type
-    market = fields["market"] or market
-    line = fields["line"] or line
-    sportsbook = fields["sportsbook"] or sportsbook
-    odds_format = fields["odds_format"] or odds_format
-    multiplier = fields["multiplier"] if fields["multiplier"] is not None else multiplier
-    wager_category = fields["wager_category"]
-    platform = fields["platform"] or platform
-    platform_type = fields["platform_type"] or platform_type
-
+    # Preserve saved ledger fields, including manager corrections.
+    # Parsing belongs to ingestion and explicit message edits, not grading.
     bet_date = bet_date_for_grade(str(content or ""), str(created_utc), str(bet_date or ""))
     net = compute_net_units(float(risk), str(odds_text or ""), result)
     admin_override = int(int(grader_user_id) == int(ADMIN_USER_ID) and int(grader_user_id) != int(capper_user_id))
@@ -4982,14 +4956,8 @@ def canonical_wager_category(value: str) -> Optional[str]:
 
 def canonical_platform(value: str) -> Tuple[str, str]:
     clean = normalize_space(value)
-    key = normalize_key(clean)
-    for platform, aliases in DFS_PLATFORM_RULES:
-        if key == normalize_key(platform) or any(key == normalize_key(alias) for alias in aliases):
-            return platform, "DFS_APP"
-    for platform, aliases in SPORTSBOOK_KEYWORDS:
-        if key == normalize_key(platform) or any(key == normalize_key(alias) for alias in aliases):
-            return platform, "SPORTSBOOK"
-    return clean[:80], ""
+    name, kind = known_platform(clean)
+    return (name, kind) if name else (clean[:80], "")
 
 
 def default_league_for_manual_sport(new_sport: str, old_league: str, old_sport: str) -> str:
@@ -5701,6 +5669,74 @@ async def league_cmd(ctx: commands.Context, *, query: str) -> None:
     await post_leaderboard_query(ctx, time_text, league_name=league_name)
 
 
+async def post_platform_record(ctx, capper, platform_name, tokens, page=1):
+    """Read-only, settled slip records. Never expose unresolved VIP pick text."""
+    if ctx.guild is None:
+        await ctx.send("Use platform records inside your Discord server.")
+        return
+    moneyball = any(t.lower() in {"moneyball", "moneyballs"} for t in tokens)
+    remaining = [t for t in tokens if t.lower() not in {"moneyball", "moneyballs", "record"}]
+    if moneyball and platform_name != "Chalkboard":
+        await ctx.send("The Moneyball filter is currently for Chalkboard.")
+        return
+    label, start, end, error = parse_time_filter(" ".join(remaining))
+    if error:
+        await ctx.send(error)
+        return
+    # Register only on this connection; no tables, rows or files are changed.
+    conn.create_function("posted_platform", 2, recorded_platform)
+    conn.create_function("posted_moneyball", 1, is_moneyball)
+    parts = ["guild_id = ?", "LOWER(capper) = ?", "posted_platform(content, platform) = ?"]
+    params = [int(ctx.guild.id), capper.lower(), platform_name]
+    if moneyball:
+        parts.append("posted_moneyball(content) = 1")
+    add_time_filter(parts, params, start, end)
+    where, values = build_where(parts, params)
+    totals = cur.execute(
+        f"""SELECT COUNT(*),
+        COALESCE(SUM(result = 'win'), 0), COALESCE(SUM(result = 'loss'), 0),
+        COALESCE(SUM(result = 'push'), 0), COALESCE(SUM(result = 'void'), 0),
+        COALESCE(SUM(net_units), 0),
+        COALESCE(SUM(CASE WHEN result != 'void' THEN risk_units ELSE 0 END), 0)
+        FROM bets WHERE {where}""", values).fetchone()
+    count, wins, losses, pushes, voids, net, risk = totals
+    pages = max(1, (count + 4) // 5)
+    if page > pages:
+        await ctx.send(f"Only {pages} page(s) match this filter.")
+        return
+    title = f"{capper} • {platform_name}" + (" Moneyball" if moneyball else "")
+    roi = f"{net / risk * 100:+.1f}%" if risk else "N/A"
+    header = (
+        f"**{title} — {label or 'All-Time'}**\n"
+        f"**{wins}W–{losses}L** | {pushes} push | {voids} void\n"
+        f"Net: **{net:+.2f}u** | Risk: **{risk:g}u** | ROI: **{roi}**\n"
+        "Posted-pick labels only; not synced accounts or verified placement. "
+        "History is incomplete where platforms were omitted. Results grade whole slips, not individual legs.\n"
+        f"Settled slips: {count} | Page {page}/{pages}"
+    )
+    await ctx.send(header, allowed_mentions=discord.AllowedMentions.none())
+    rows = cur.execute(
+        f"""SELECT bet_date, result, risk_units, net_units, content, jump_url
+        FROM bets WHERE {where}
+        ORDER BY COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) DESC,
+                 graded_utc DESC, message_id DESC LIMIT 5 OFFSET ?""",
+        (*values, (page - 1) * 5)).fetchall()
+    for day, result, stake, profit, content, jump in rows:
+        symbol = {"win": "✅", "loss": "❌", "push": "➖", "void": "↩️"}.get(result, "?")
+        # Plain escaped source preserves multi-leg context; link offers the full post.
+        source = discord.utils.escape_markdown(str(content or "No saved text"))
+        source = source[:1100] + ("…" if len(source) > 1100 else "")
+        focus = ""
+        if moneyball:
+            focus = "\nMoneyball focus: " + discord.utils.escape_markdown(moneyball_focus(content))[:250]
+        link = f"\n[Original post]({jump})" if re.fullmatch(r"https://discord\.com/channels/\d+/\d+/\d+", str(jump or "")) else ""
+        await ctx.send(
+            f"{symbol} **{day or 'Date unavailable'}** | {stake:g}u risk | {profit:+.2f}u net"
+            f"{focus}\n{source}{link}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 @bot.command(name="capper", aliases=["bets"])
 async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
     tokens = split_args(query)
@@ -5724,6 +5760,11 @@ async def capper_cmd(ctx: commands.Context, *, query: str) -> None:
             "Use `bt!capper PropKitchen july`, `bt!capper PropKitchen strikeouts july`, "
             "`bt!capper PropKitchen player Zack Wheeler july`, or `bt!report PropKitchen july`."
         )
+        return
+
+    platform_name, platform_remaining = consume_platform(remaining)
+    if platform_name:
+        await post_platform_record(ctx, capper, platform_name, platform_remaining, page)
         return
 
     if wants_report:
@@ -6184,3 +6225,4 @@ if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable (set it in Render Environment).")
 
 bot.run(TOKEN)
+

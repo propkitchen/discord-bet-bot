@@ -3215,6 +3215,7 @@ async def autoclean_cmd(
 @tasks.loop(minutes=5)
 async def autoclean_loop() -> None:
     """Best-effort cleanup of explicitly queued IDs; never sweep channel history."""
+    maintain_pk_ledger()
     now_epoch = int(time.time())
     for guild_id, channel_id, message_id in due_messages(
         conn, now_epoch, limit=30
@@ -3605,6 +3606,45 @@ async def require_server_context(ctx: commands.Context) -> bool:
     # Reports and exports must never query all servers from a direct message.
     return ctx.guild is not None
 
+
+
+def maintain_pk_ledger():
+    """Apply the reviewed November repairs once and expire only PK pending rows."""
+    import hashlib
+    guild = 1251681721544478851
+    now = datetime.now(timezone.utc)
+    with conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS pk_maintenance (name TEXT PRIMARY KEY, day TEXT)")
+        last = conn.execute("SELECT day FROM pk_maintenance WHERE name='nov2026'").fetchone()
+        if last and last[0] == now.date().isoformat():
+            return
+        if not last:
+            backup_path = DB_PATH + ".pre-nov2026-" + str(time.time_ns())
+            with sqlite3.connect(backup_path) as backup:
+                conn.backup(backup)
+            repairs = (
+                (1499428029544399060, 5.0, '-102', 'loss', -5.0, 'e950cfc3d5220267f3e690b7c7a4e9fc904c393e8b243ad09fb0751b8143ff57', 0.5),
+                (1501723626301423728, 25.0, '+158', 'loss', -25.0, '0895fd02b295cde63c1d2bccb869608438312a57fb0e1de384f9b41d6d11cef3', 0.25),
+                (1507113733309333627, 1.0, '-140', 'win', 0.7142857142857143, '36ae6a242001c52585e52e97e57fff35ff25a207a931453f353629d69bca580b', 1.25),
+                (1509359696753201303, 1.0, '-145', 'win', 0.6896551724137931, '93642d391a72e895be01c2ae4f0d606446d8b61e0ac6491ab2ff1facc8095ec5', 1.25),
+                (1512596983267983421, 75.0, '-104', 'loss', -75.0, 'cb5e91bcc038c241a1811dbc7836854ad9b86a0eb8c3e579ed08b8c80d3c51d7', 0.75),
+                (1514648321174536333, 75.0, '-135', 'win', 55.55555555555555, 'e3ce937ad6843aececb064973ca005907b8c9df99acb19abf9d8cd6ab9fd12b9', 0.75),
+                (1515038750047080459, 75.0, '+137', 'win', 102.75000000000001, 'def26df536055d2c97bc645d51ed8e86d645023edd0915a82f66110cab4c1ad7', 0.75),
+                (1515025728335384596, 5.0, '+111', 'loss', -5.0, '565936a8d09f03050c0eb39d7ef9a2c52a9f37169baa8828b05de4c653e2c14f', 0.5),
+                (1515743307148431431, 75.0, '-104', 'win', 72.11538461538461, '0ef6263fffe7daf80df56a8e4e66702170128d472a5491c2d629a1ecf32ae9e6', 0.75),
+                (1516301012892389438, 75.0, '+130', 'win', 97.5, 'ad45ae1363c0e91e04489d8c53307e1cfd90cf814ea83997b21ad89f2e72d4a2', 0.5),
+                (1517957749609201704, 75.0, '+132', 'win', 99.0, '143de6dff5ff246d8bf46eb2bb4cb7ffe20cff586388c888f999b2fa6a441d3e', 1),
+            )
+            for mid, old, odds, grade, net, digest, stake in repairs:
+                row = conn.execute("SELECT content FROM bets WHERE message_id=? AND guild_id=? AND lower(capper)='gr8' AND risk_units=? AND odds_text=? AND result=? AND net_units=?", (mid, guild, old, odds, grade, net)).fetchone()
+                if row and hashlib.sha256(row[0].encode()).hexdigest() == digest:
+                    conn.execute("UPDATE bets SET risk_units=?, net_units=? WHERE message_id=?", (stake, compute_net_units(stake, odds, grade), mid))
+                    log_correction(mid, "bets", "risk_units", str(old), str(stake), ADMIN_USER_ID, "Verified against saved wager text in November audit")
+        cutoff = (now - timedelta(days=60)).isoformat() if last else "2026-09-30T08:26:49+00:00"
+        channels = tuple(set(TRACKED_CHANNELS) | SHARED_TRACKING_CHANNEL_IDS)
+        slots = ",".join("?" for _ in channels)
+        conn.execute(f"DELETE FROM pending WHERE (guild_id=? OR (guild_id=0 AND channel_id IN ({slots}))) AND julianday(created_utc)<julianday(?)", (guild, *channels, cutoff))
+        conn.execute("INSERT OR REPLACE INTO pk_maintenance VALUES ('nov2026', ?)", (now.date().isoformat(),))
 
 @bot.event
 async def on_ready() -> None:

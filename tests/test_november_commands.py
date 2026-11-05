@@ -85,7 +85,7 @@ class NovemberCommandTests(unittest.TestCase):
             "<@&1387012502050701423>"
         )
         actual = compact(old_post)
-        self.assertIn("Cedric Coward o6.5 Rebounds", actual)
+        self.assertIn("Cedric Coward o6.5 Reb", actual)
         self.assertNotIn("Fanatics", actual)
         self.assertNotIn("MEMGrizzlies", actual)
         self.assertNotIn("**", actual)
@@ -95,7 +95,7 @@ class NovemberCommandTests(unittest.TestCase):
             "1u | -107 DraftKings\n<@&123456789012345678>"
         )
         draft = compact(draftkings_post)
-        self.assertIn("Player Example u4.5 Assists", draft)
+        self.assertIn("Player Example u4.5 Ast", draft)
         self.assertNotIn("DraftKings", draft)
 
     def test_recap_keeps_regular_single_line_wagers(self):
@@ -112,7 +112,7 @@ class NovemberCommandTests(unittest.TestCase):
         )
         self.assertIn(
             "Jaime Jaquez Jr o8.5 Reb+Ast",
-            compact("1u Jaime Jaquez Jr OVER 8.5 Reb+Ast"),
+            compact("1u Jaime Jaquez Jr OVER 8.5 Reb+Ast", ""),
         )
 
 

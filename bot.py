@@ -923,6 +923,9 @@ def _clean_description_fragment(value: str) -> str:
     clean = RE_UNITS.sub("", clean)
     clean = _remove_odds_and_dates(clean)
     clean = re.sub(r"(?i)\b(?:odds?|date)\s*[:=]?", "", clean)
+    # Markdown is presentation, not wager data; strip it before choosing a
+    # description so premium Discord headings/bold picks remain parseable.
+    clean = re.sub(r"[*_`~#]+", "", clean)
     clean = normalize_space(clean).strip(" -–—|:()")
     return clean
 
@@ -976,17 +979,34 @@ def extract_bet_description(content: str, market: str = "", max_len: int = 140) 
     candidates: List[str] = []
     if stake_index is not None:
         same_line = _clean_description_fragment(lines[stake_index])
-        if _description_is_meaningful(same_line):
-            candidates.append(same_line)
-
+        previous = ""
         for index in range(stake_index - 1, -1, -1):
-            previous = _clean_description_fragment(lines[index])
-            if not previous:
+            candidate = _clean_description_fragment(lines[index])
+            if not candidate:
                 continue
             if re.fullmatch(r"(?:<@!?&?\d+>\s*)+", lines[index]):
                 continue
-            candidates.append(previous)
+            previous = candidate
             break
+
+        # Prefer a recognizable betting selection over a metadata-only line
+        # such as "1u | -130 Fanatics". Do not treat a sportsbook as a pick.
+        selection = re.compile(
+            r"(?i)\b(?:OVER|UNDER|MORE|LESS)\s*\d|"
+            r"(?<![A-Za-z])(?:O|U)\s*\d|"
+            r"\b(?:TO RECORD|ANYTIME|MONEYLINE|TO WIN)\b"
+        )
+        if selection.search(same_line):
+            candidates.append(same_line)
+        if previous and selection.search(previous):
+            candidates.append(previous)
+        # Preserve the original fallback for free-form wagers without
+        # an explicit OVER/UNDER or similar selection.
+        if not candidates:
+            if _description_is_meaningful(same_line):
+                candidates.append(same_line)
+            if previous:
+                candidates.append(previous)
     else:
         whole = _clean_description_fragment(raw)
         if whole:
@@ -1786,6 +1806,7 @@ RECAP_MARKET_ABBREVIATIONS = (
 def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
     """Compact wager-only text. Remove odds, site labels and broken punctuation."""
     description = display_bet_text(content, market, max_len=max_len + 100)
+    description = re.sub(r"[*_`~#]+", "", description)
     description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
     description = re.sub(r":[A-Za-z0-9_]+:", "", description)
     description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)

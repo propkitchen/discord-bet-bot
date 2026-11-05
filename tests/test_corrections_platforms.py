@@ -113,7 +113,7 @@ class LedgerTests(unittest.TestCase):
         before = list(self.db.iterdump())
         asyncio.run(ns['post_platform_record'](self.ctx, 'sample', 'Chalkboard', ['moneyball', 'record']))
         output = '\n'.join(self.messages)
-        self.assertIn('Combo slips: ', output)
+        self.assertIn('Combo slips:** ', output)
         self.assertIn('Moneyball legs:', output)
         self.assertIn('1 ungraded', output)
         self.assertIn('Luka Doncic o33.5 Points', output)

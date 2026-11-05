@@ -1786,6 +1786,39 @@ RECAP_MARKET_ABBREVIATIONS = (
 def compact_bet_description(content: str, market: str, max_len: int = 95) -> str:
     """Compact wager-only text. Remove odds, site labels and broken punctuation."""
     description = display_bet_text(content, market, max_len=max_len + 100)
+    # Old posts often put the player/market ABOVE a separate "1u | -130 Fanatics"
+    # stake line. The generic extractor can choose "Fanatics" instead of the prop.
+    # Recover a real wager line only for display: never rewrite saved bet records.
+    prop_pattern = (
+        r"(?i)\b(?:over|under)\s*(?:\d|\.)"
+        r"|(?<![A-Za-z])(?:o|u)\d+(?:\.\d+)?\b"
+        r"|\b(?:moneyline|spread|anytime|to record|double.double)\b"
+        r"|\b\d+(?:\.\d+)?\+\s*(?:points?|pts?|rebounds?|rebs?|"
+        r"assists?|asts?|receptions?|yards?|sog|shots?)\b"
+    )
+    if not re.search(prop_pattern, description):
+        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+        stake_index = next(
+            (i for i, line in enumerate(lines)
+             if re.search(r"(?i)(?<![\w.])(?:\d+(?:\.\d+)?|\.\d+)\s*u\b", line)),
+            len(lines),
+        )
+        # Look on the stake line first, then closest preceding lines.
+        ordered = (
+            [lines[stake_index]] + list(reversed(lines[:stake_index]))
+            + lines[stake_index + 1:]
+            if stake_index < len(lines) else lines
+        )
+        for candidate in ordered:
+            if re.search(prop_pattern, candidate) and not re.search(
+                r"(?i)\b(?:moneyball promo|every made|counts as|sign up)\b",
+                candidate,
+            ):
+                description = candidate
+                break
+        else:
+            if re.search(prop_pattern, str(market or "")):
+                description = str(market)
     description = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", description)
     description = re.sub(r":[A-Za-z0-9_]+:", "", description)
     description = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", description)
@@ -1804,6 +1837,9 @@ def compact_bet_description(content: str, market: str, max_len: int = 95) -> str
         "", description,
     )
     description = re.sub(r"\s*\|\s*", " ", description)
+    description = re.sub(r"\*\*|__|(?<!\w)#{1,3}\s*", "", description)
+    description = re.sub(r"(?i)(?<![\w.])(?:\d+(?:\.\d+)?|\.\d+)\s*u\b", "", description)
+    description = re.sub(r"(?<!\w)[+-]\d{2,5}\b", "", description)
     description = re.sub(r"(?i)\bOVER\s*(?=\d|\.)", "o", description)
     description = re.sub(r"(?i)\bUNDER\s*(?=\d|\.)", "u", description)
     for pattern, replacement in RECAP_MARKET_ABBREVIATIONS:

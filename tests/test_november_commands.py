@@ -61,6 +61,61 @@ class NovemberCommandTests(unittest.TestCase):
         self.assertIn("+0.86u", text)
         self.assertIn("[jump]", text)
 
+
+    def test_recaps_recover_player_when_stake_line_only_has_sportsbook(self):
+        aliases = next(n for n in TREE.body if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "RECAP_MARKET_ABBREVIATIONS"
+            for t in n.targets
+        ))
+        abbrevs = ast.literal_eval(aliases.value)
+        def compact(content, market=""):
+            # The underlying generic extractor currently picks the platform on
+            # these old multiline posts. The recap must find the actual wager.
+            return isolate(
+                "compact_bet_description",
+                display_bet_text=lambda content, market, max_len=195: "Fanatics",
+                normalize_space=lambda s: " ".join(s.split()),
+                RECAP_MARKET_ABBREVIATIONS=abbrevs, re=re,
+            )(content, market)
+
+        old_post = (
+            "## NBA Prop #5 🏀 (11/4)\n\n"
+            "<:MEMGrizzlies:1429488742921670820> : **Cedric Coward OVER 6.5 Rebounds**\n"
+            "1u | -130 Fanatics <:fanatics:1504956348411023380>\n"
+            "<@&1387012502050701423>"
+        )
+        actual = compact(old_post)
+        self.assertIn("Cedric Coward o6.5 Reb", actual)
+        self.assertNotIn("Fanatics", actual)
+        self.assertNotIn("MEMGrizzlies", actual)
+        self.assertNotIn("**", actual)
+
+        draftkings_post = (
+            "NBA Prop #4\n\n:Wizards: **Player Example UNDER 4.5 Assists**\n"
+            "1u | -107 DraftKings\n<@&123456789012345678>"
+        )
+        draft = compact(draftkings_post)
+        self.assertIn("Player Example u4.5 Ast", draft)
+        self.assertNotIn("DraftKings", draft)
+
+    def test_recap_keeps_regular_single_line_wagers(self):
+        aliases = next(n for n in TREE.body if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "RECAP_MARKET_ABBREVIATIONS"
+            for t in n.targets
+        ))
+        compact = isolate(
+            "compact_bet_description",
+            display_bet_text=lambda content, market, max_len=195: content,
+            normalize_space=lambda s: " ".join(s.split()),
+            RECAP_MARKET_ABBREVIATIONS=ast.literal_eval(aliases.value),
+            re=re,
+        )
+        self.assertIn(
+            "Jaime Jaquez Jr o8.5 Reb+Ast",
+            compact("1u Jaime Jaquez Jr OVER 8.5 Reb+Ast", ""),
+        )
+
+
     def test_pending_links_only_for_own_guild(self):
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()

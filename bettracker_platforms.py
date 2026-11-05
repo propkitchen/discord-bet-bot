@@ -59,7 +59,12 @@ def moneyball_focus(content):
         # Promo copy may begin with 🎯 and mention a player, but is not a bet leg.
         if re.search(r'(?i)\b(?:every made|counts as|moneyball\s*(?:promo)?\s*:|free pick|sign up)\b', line):
             continue
-        if not re.search(r'(?i)\b(?:over|under)\s*\d|(?<!\w)[ou]\d+(?:\.\d+)?\b', line):
+        if not re.search(
+            r'(?i)\b(?:over|under)\s*\d|(?<!\w)[ou]\d+(?:\.\d+)?\b'
+            r'|\b\d+(?:\.\d+)?\s*(?:pts?|points?|reb(?:ounds?)?|assists?|'
+            r'ast|pra|sog|shots?|threes?|3s|yards?|receptions?)\b',
+            line,
+        ):
             continue
         clean = re.sub(r'<a?:\w+:\d+>|:[\w-]+:', ' ', line)
         clean = re.sub(r'\(\s*moneyball\s*\)', ' ', clean, flags=re.I)

@@ -482,6 +482,18 @@ def ensure_schema() -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_correction_message ON correction_audit(message_id);")
+    # Independent Moneyball leg grades never modify original combo results.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS moneyball_leg_grades (
+            guild_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            result TEXT NOT NULL CHECK (result IN ('win','loss','push','void')),
+            focus_override TEXT NOT NULL DEFAULT '',
+            grader_user_id INTEGER NOT NULL,
+            graded_utc TEXT NOT NULL,
+            PRIMARY KEY (guild_id, message_id)
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS recap_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -5709,6 +5721,83 @@ async def league_cmd(ctx: commands.Context, *, query: str) -> None:
     await post_leaderboard_query(ctx, time_text, league_name=league_name)
 
 
+
+async def post_moneyball_compact(ctx, capper, label, where_sql, values, page):
+    """Report independently graded Moneyball legs, never guessing from combo wins."""
+    totals = cur.execute(
+        f"""SELECT COUNT(*),
+        COALESCE(SUM(result='win'),0), COALESCE(SUM(result='loss'),0),
+        COALESCE(SUM(result='push'),0), COALESCE(SUM(result='void'),0),
+        COALESCE(SUM(net_units),0),
+        COALESCE(SUM(CASE WHEN result!='void' THEN risk_units ELSE 0 END),0)
+        FROM bets WHERE {where_sql}""", values,
+    ).fetchone()
+    count, wins, losses, pushes, voids, net, risk = totals
+    pages = max(1, (int(count) + 4) // 5)
+    if page > pages:
+        await ctx.send(f"Only {pages} page(s) match this filter.")
+        return
+
+    leg_counts = {"win": 0, "loss": 0, "push": 0, "void": 0}
+    grade_rows = cur.execute(
+        f"""SELECT result, COUNT(*) FROM moneyball_leg_grades
+        WHERE guild_id = ? AND message_id IN
+          (SELECT message_id FROM bets WHERE {where_sql})
+        GROUP BY result""", (int(ctx.guild.id), *values),
+    ).fetchall()
+    for result, amount in grade_rows:
+        if result in leg_counts:
+            leg_counts[result] = int(amount)
+    ungraded = max(0, int(count) - sum(leg_counts.values()))
+    roi = f"{float(net) / float(risk) * 100:+.1f}%" if risk else "N/A"
+    lines = [
+        f"**{capper} • Chalkboard Moneyball — {label or 'All-Time'}**",
+        f"**Combo slips:** {wins}W–{losses}L | {pushes} push | {voids} void",
+        f"Net: **{float(net):+.2f}u** | Risk: {float(risk):g}u | ROI: **{roi}**",
+        (f"**Moneyball legs:** {leg_counts['win']}W–{leg_counts['loss']}L"
+         f" | {leg_counts['push']} push | {leg_counts['void']} void"
+         f" | **{ungraded} ungraded**"),
+        f"Settled slips: {count} | Page {page}/{pages}",
+        "_Leg outcomes are separately recorded; none are inferred from combos._",
+    ]
+    rows = cur.execute(
+        f"""SELECT message_id, bet_date, result, risk_units, net_units,
+                   odds_text, content, jump_url
+        FROM bets WHERE {where_sql}
+        ORDER BY COALESCE(NULLIF(bet_date, ''), substr(created_utc, 1, 10)) DESC,
+                 graded_utc DESC, message_id DESC LIMIT 5 OFFSET ?""",
+        (*values, (page - 1) * 5),
+    ).fetchall()
+    for message_id, day, result, stake, profit, odds, content, jump in rows:
+        symbol = {"win": "✅", "loss": "❌", "push": "➖", "void": "↩️"}.get(result, "❔")
+        recorded = cur.execute(
+            "SELECT result, focus_override FROM moneyball_leg_grades "
+            "WHERE guild_id=? AND message_id=?",
+            (int(ctx.guild.id), int(message_id)),
+        ).fetchone()
+        leg_result = recorded[0] if recorded else ""
+        focus = str(recorded[1] or "") if recorded else ""
+        if not focus:
+            focus = moneyball_focus(content)
+        focus = discord.utils.escape_markdown(focus)[:140]
+        leg_display = {
+            "win": "✅ Won", "loss": "❌ Lost", "push": "➖ Push",
+            "void": "↩️ Void", "": "⏳ Ungraded",
+        }.get(leg_result, "⏳ Ungraded")
+        link = (
+            f" | [post]({jump})"
+            if re.fullmatch(r"https://discord\.com/channels/\d+/\d+/\d+", str(jump or ""))
+            else ""
+        )
+        lines.append(
+            f"\n**{day or 'Date unavailable'}** {symbol} Combo"
+            f" | {float(stake):g}u @ {str(odds or 'N/A')}"
+            f" | **{float(profit):+.2f}u**{link}\n"
+            f"🎯 {focus} | Leg: **{leg_display}**"
+        )
+    await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+
+
 async def post_platform_record(ctx, capper, platform_name, tokens, page=1):
     """Read-only, settled slip records. Never expose unresolved VIP pick text."""
     if ctx.guild is None:
@@ -5732,6 +5821,8 @@ async def post_platform_record(ctx, capper, platform_name, tokens, page=1):
         parts.append("posted_moneyball(content) = 1")
     add_time_filter(parts, params, start, end)
     where, values = build_where(parts, params)
+    if moneyball:
+        return await post_moneyball_compact(ctx, capper, label, where, values, page)
     totals = cur.execute(
         f"""SELECT COUNT(*),
         COALESCE(SUM(result = 'win'), 0), COALESCE(SUM(result = 'loss'), 0),
@@ -5775,6 +5866,89 @@ async def post_platform_record(ctx, capper, platform_name, tokens, page=1):
             f"{focus}\n{source}{link}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+
+
+@bot.command(name="setmoneyball", aliases=["moneyballgrade", "setmoneyballleg"])
+async def setmoneyball_cmd(ctx: commands.Context, status: str, *, focus_arg: str = "") -> None:
+    """Reply to a settled Chalkboard Moneyball slip to grade its individual leg."""
+    if ctx.guild is None:
+        await ctx.send("Use this command inside your Discord server.")
+        return
+    message_id = referenced_message_id(ctx)
+    if message_id is None:
+        await ctx.send("Reply to a settled Chalkboard Moneyball slip with bt!setmoneyball win or loss.")
+        return
+    row = cur.execute(
+        "SELECT capper_user_id, content, platform FROM bets "
+        "WHERE guild_id=? AND message_id=?",
+        (int(ctx.guild.id), int(message_id)),
+    ).fetchone()
+    if not row:
+        await ctx.send("The original slip must be graded and saved before grading its Moneyball leg.")
+        return
+    owner_id, content, platform = row
+    can_grade = (
+        int(ctx.author.id) in {int(owner_id), int(ADMIN_USER_ID)}
+        or bool(ctx.author.guild_permissions.manage_guild)
+    )
+    if not can_grade:
+        await ctx.send("Only the original capper or a server manager can grade this Moneyball leg.")
+        return
+    if recorded_platform(content, platform) != "Chalkboard" or not is_moneyball(content):
+        await ctx.send("That bet is not identified as a Chalkboard Moneyball slip.")
+        return
+
+    choices = {"win": "win", "won": "win", "w": "win",
+               "loss": "loss", "lost": "loss", "l": "loss",
+               "push": "push", "p": "push",
+               "void": "void", "v": "void",
+               "clear": "", "reset": "", "ungrade": ""}
+    choice = choices.get(status.strip().lower())
+    if choice is None:
+        await ctx.send("Use bt!setmoneyball win, loss, push, void, or clear as a reply.")
+        return
+    old = cur.execute(
+        "SELECT result, focus_override FROM moneyball_leg_grades "
+        "WHERE guild_id=? AND message_id=?",
+        (int(ctx.guild.id), int(message_id)),
+    ).fetchone()
+    if choice == "":
+        if old:
+            cur.execute(
+                "DELETE FROM moneyball_leg_grades WHERE guild_id=? AND message_id=?",
+                (int(ctx.guild.id), int(message_id)),
+            )
+            log_correction(message_id, "moneyball_leg_grades", "result",
+                           old[0], "ungraded", ctx.author.id, "Independent Moneyball leg")
+            conn.commit()
+        await ctx.send("✅ Moneyball leg grade cleared; combo result and units unchanged.")
+        return
+    focus = normalize_space(focus_arg)[:140] if focus_arg else (str(old[1]) if old else "")
+    visible_focus = focus or moneyball_focus(content)
+    if visible_focus == "Not explicitly labeled":
+        await ctx.send("Moneyball leg not identifiable. Include its prop, e.g. "
+                       "bt!setmoneyball win Luka Doncic o33.5 Points.")
+        return
+    if old and old[0] == choice and old[1] == focus:
+        await ctx.send("This Moneyball leg already has that grade.")
+        return
+    cur.execute(
+        """INSERT INTO moneyball_leg_grades
+            (guild_id, message_id, result, focus_override, grader_user_id, graded_utc)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, message_id) DO UPDATE SET
+                result=excluded.result, focus_override=excluded.focus_override,
+                grader_user_id=excluded.grader_user_id, graded_utc=excluded.graded_utc""",
+        (int(ctx.guild.id), int(message_id), choice, focus,
+         int(ctx.author.id), utc_iso(datetime.now(timezone.utc))),
+    )
+    log_correction(message_id, "moneyball_leg_grades", "result",
+                   old[0] if old else "ungraded", choice, ctx.author.id,
+                   f"Independent Moneyball leg; focus: {visible_focus}")
+    conn.commit()
+    await ctx.send(f"✅ Moneyball leg recorded as **{choice.upper()}**. "
+                   "Combo result, stake, payout, and units were not changed.")
 
 
 @bot.command(name="capper", aliases=["bets"])

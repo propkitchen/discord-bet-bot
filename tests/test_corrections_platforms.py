@@ -93,6 +93,102 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn(excluded, text)
         self.assertEqual(before, list(self.db.iterdump()))
 
+
+    def test_moneyball_compact_does_not_copy_ad_text_or_assume_leg_result(self):
+        promo = ("0.75u Chalkboard Combo (1.84x)\n"
+                 "🍽️:Lakers: Luka Doncic o33.5 Points (Moneyball)\n"
+                 "🍽️:Bears: Luther Burden o2.5 Receptions\n"
+                 "🎯 Moneyball: Every made 3-pointer by Doncic counts as 4 points!\n"
+                 "New users get a FREE pick + $500 in bonus funds.\n"
+                 "https://t.co/8o5VNZFdTu\n@VIP Members")
+        self.insert(1, promo, guild=1)
+        self.insert(2, "1u Chalkboard Moneyball\nMoneyball player: SECRET\nNBA Player o12.5 Points 2x", guild=2)
+        self.assertTrue(ns['grade_pending'](1, 'win', '✅', 42))
+        self.assertTrue(ns['grade_pending'](2, 'win', '✅', 42))
+        self.db.execute("UPDATE bets SET jump_url=? WHERE message_id=1",
+                        ("https://discord.com/channels/1/2/1",))
+        self.db.commit()
+        ns['discord'] = SimpleNamespace(AllowedMentions=SimpleNamespace(none=lambda: None),
+            utils=SimpleNamespace(escape_markdown=lambda s: s))
+        before = list(self.db.iterdump())
+        asyncio.run(ns['post_platform_record'](self.ctx, 'sample', 'Chalkboard', ['moneyball', 'record']))
+        output = '\n'.join(self.messages)
+        self.assertIn('Combo slips:** ', output)
+        self.assertIn('Moneyball legs:', output)
+        self.assertIn('1 ungraded', output)
+        self.assertIn('Luka Doncic o33.5 Points', output)
+        self.assertIn('Leg: **⏳ Ungraded**', output)
+        self.assertIn('[post](https://discord.com/channels/1/2/1)', output)
+        for forbidden in ['FREE pick', 'bonus funds', 'https://t.co', '@VIP', 'SECRET',
+                          'Every made 3-pointer', 'Luther Burden']:
+            self.assertNotIn(forbidden, output)
+        self.assertEqual(before, list(self.db.iterdump()))
+
+    def test_moneyball_grade_command_is_audited_and_independent_of_combo(self):
+        self.insert(1, '0.75u NBA Chalkboard Combo 1.84x\n'
+                        '🍽️ Luka Doncic o33.5 Points (Moneyball)\n'
+                        '🎯 Moneyball: Every made 3-pointer by Doncic counts as 4 points!', guild=1)
+        self.assertTrue(ns['grade_pending'](1, 'loss', '❌', 42))
+        baseline = self.db.execute(
+            "SELECT result, net_units, risk_units, odds_text FROM bets WHERE message_id=1"
+        ).fetchone()
+        self.ctx.author.guild_permissions = SimpleNamespace(manage_guild=False)
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win'))
+        row = self.db.execute(
+            "SELECT guild_id, result, grader_user_id FROM moneyball_leg_grades WHERE message_id=1"
+        ).fetchone()
+        self.assertEqual((1, 'win', 42), row)
+        self.assertEqual(baseline, self.db.execute(
+            "SELECT result, net_units, risk_units, odds_text FROM bets WHERE message_id=1"
+        ).fetchone())
+        self.assertGreater(self.db.execute(
+            "SELECT COUNT(*) FROM correction_audit WHERE table_name='moneyball_leg_grades'"
+        ).fetchone()[0], 0)
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'loss'))
+        self.assertEqual('loss', self.db.execute(
+            "SELECT result FROM moneyball_leg_grades WHERE message_id=1"
+        ).fetchone()[0])
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'clear'))
+        self.assertEqual(0, self.db.execute(
+            "SELECT COUNT(*) FROM moneyball_leg_grades"
+        ).fetchone()[0])
+        self.assertEqual(baseline, self.db.execute(
+            "SELECT result, net_units, risk_units, odds_text FROM bets WHERE message_id=1"
+        ).fetchone())
+
+    def test_moneyball_grade_requires_permission_and_settled_slip(self):
+        self.insert(1, '1u NBA Chalkboard Moneyball\nMoneyball player: Luka Doncic\n'
+                        'Luka Doncic over 33.5 Points 2x', guild=1)
+        self.ctx.author.guild_permissions = SimpleNamespace(manage_guild=False)
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win'))
+        self.assertIn('must be graded', self.messages[-1])
+        self.assertTrue(ns['grade_pending'](1, 'win', '✅', 42))
+        self.ctx.author.id = 555
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win'))
+        self.assertIn('Only the original capper', self.messages[-1])
+        self.assertIsNone(self.db.execute(
+            "SELECT result FROM moneyball_leg_grades WHERE message_id=1"
+        ).fetchone())
+        self.ctx.author.id = 42
+        self.ctx.guild.id = 2
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win'))
+        self.assertIsNone(self.db.execute(
+            "SELECT result FROM moneyball_leg_grades WHERE message_id=1"
+        ).fetchone())
+
+    def test_moneyball_grade_explicit_focus_for_legacy_post(self):
+        self.insert(1, '1u NBA Chalkboard Moneyball Combo 2x\n'
+                        '🎯 Moneyball: Every made 3-pointer counts as 4 points', guild=1)
+        self.assertTrue(ns['grade_pending'](1, 'win', '✅', 42))
+        self.ctx.author.guild_permissions = SimpleNamespace(manage_guild=False)
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win'))
+        self.assertIn('not identifiable', self.messages[-1])
+        asyncio.run(ns['setmoneyball_cmd'](self.ctx, 'win', focus_arg='Luka Doncic o33.5 Points'))
+        self.assertEqual(('win', 'Luka Doncic o33.5 Points'),
+            self.db.execute('SELECT result, focus_override FROM moneyball_leg_grades').fetchone())
+        self.assertEqual('win', self.db.execute('SELECT result FROM bets WHERE message_id=1').fetchone()[0])
+
+
 class PlatformTests(unittest.TestCase):
     def test_all_explicit_platforms(self):
         for name, kind, aliases in PLATFORMS:
@@ -111,6 +207,25 @@ class PlatformTests(unittest.TestCase):
     def test_focus_is_not_guessed(self):
         self.assertEqual('Not explicitly labeled', moneyball_focus('Chalkboard Moneyball\nLuka + Player B'))
         self.assertEqual('Luka Doncic', moneyball_focus('Moneyball player: Luka Doncic'))
+
+    def test_focus_from_real_combo_excludes_marketing_copy(self):
+        text = ("0.75u Chalkboard Combo\n"
+                "🍽️:Lakers: Luka Doncic o33.5 Points (Moneyball)\n"
+                "🍽️:Bears: Luther Burden o2.5 Receptions\n"
+                "🎯 Moneyball: Every made 3-pointer by Doncic counts as 4 points!\n"
+                "New users get a FREE pick")
+        self.assertEqual('Luka Doncic o33.5 Points', moneyball_focus(text))
+        self.assertEqual('Not explicitly labeled',
+                         moneyball_focus('🎯 Moneyball: Every made 3-pointer counts as 4 points!'))
+        self.assertEqual(
+            'AJ Green 6.5 Points',
+            moneyball_focus('Chalkboard NBA Moneyball Promo\n- AJ Green 6.5 Points (Moneyball)\n- Ajay Mitchell o15.5 PR'),
+        )
+        self.assertEqual(
+            'Ja’Kobe Walter o11.5 Points',
+            moneyball_focus('Chalkboard Moneyball Combo\n🍽️ Ja’Kobe Walter o11.5 Points (Moneyball)'),
+        )
+
     def test_command_aliases(self):
         self.assertEqual(('DK Pick6', ['november']), consume_platform(['DraftKings', 'Pick6', 'november']))
         self.assertEqual(('Chalkboard', ['moneyball', 'record']), consume_platform(['chalkboard', 'moneyball', 'record']))

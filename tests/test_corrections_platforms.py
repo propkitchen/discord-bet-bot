@@ -217,6 +217,14 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual('Luka Doncic o33.5 Points', moneyball_focus(text))
         self.assertEqual('Not explicitly labeled',
                          moneyball_focus('🎯 Moneyball: Every made 3-pointer counts as 4 points!'))
+        self.assertEqual(
+            'AJ Green 6.5 Points',
+            moneyball_focus('Chalkboard NBA Moneyball Promo\n- AJ Green 6.5 Points (Moneyball)\n- Ajay Mitchell o15.5 PR'),
+        )
+        self.assertEqual(
+            'Ja’Kobe Walter o11.5 Points',
+            moneyball_focus('Chalkboard Moneyball Combo\n🍽️ Ja’Kobe Walter o11.5 Points (Moneyball)'),
+        )
 
     def test_command_aliases(self):
         self.assertEqual(('DK Pick6', ['november']), consume_platform(['DraftKings', 'Pick6', 'november']))

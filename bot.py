@@ -923,6 +923,8 @@ def _clean_description_fragment(value: str) -> str:
     clean = RE_UNITS.sub("", clean)
     clean = _remove_odds_and_dates(clean)
     clean = re.sub(r"(?i)\b(?:odds?|date)\s*[:=]?", "", clean)
+    # Discord Markdown is presentation, not part of the wager text.
+    clean = re.sub(r"[*_`~#]+", "", clean)
     clean = normalize_space(clean).strip(" -–—|:()")
     return clean
 
@@ -976,17 +978,32 @@ def extract_bet_description(content: str, market: str = "", max_len: int = 140) 
     candidates: List[str] = []
     if stake_index is not None:
         same_line = _clean_description_fragment(lines[stake_index])
-        if _description_is_meaningful(same_line):
-            candidates.append(same_line)
-
+        previous = ""
         for index in range(stake_index - 1, -1, -1):
-            previous = _clean_description_fragment(lines[index])
-            if not previous:
+            candidate = _clean_description_fragment(lines[index])
+            if not candidate:
                 continue
             if re.fullmatch(r"(?:<@!?&?\d+>\s*)+", lines[index]):
                 continue
-            candidates.append(previous)
+            previous = candidate
             break
+
+        # "1u | -130 Fanatics" is metadata, not the selected wager.
+        # Prefer player/market/direction text when it is on the line above.
+        selection = re.compile(
+            r"(?i)\b(?:OVER|UNDER|MORE|LESS)\s*\d|"
+            r"(?<![A-Za-z])(?:O|U)\s*\d|"
+            r"\b(?:TO RECORD|ANYTIME|MONEYLINE|TO WIN)\b"
+        )
+        if selection.search(same_line):
+            candidates.append(same_line)
+        if previous and selection.search(previous):
+            candidates.append(previous)
+        if not candidates:
+            if _description_is_meaningful(same_line):
+                candidates.append(same_line)
+            if previous:
+                candidates.append(previous)
     else:
         whole = _clean_description_fragment(raw)
         if whole:

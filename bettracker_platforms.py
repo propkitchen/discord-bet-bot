@@ -46,12 +46,27 @@ def is_moneyball(content):
     return bool(re.search(r'\bmoney[\s-]*ball\b', str(content or ''), re.I))
 
 def moneyball_focus(content):
-    for line in str(content or '').splitlines():
-        match = re.match(r'\s*moneyball\s+player\s*:\s*(.+)', line, re.I)
-        if match:
-            return match[1].strip()
-        if '🎯' in line and re.search(r'\b(?:over|under|points|pts|rebounds|assists)\b|\b[ou]\d', line, re.I):
-            return line.strip()
+    """Return the explicitly marked Moneyball wager, never promotional explanation."""
+    lines = str(content or '').splitlines()
+    for line in lines:
+        named = re.match(r'\s*moneyball\s+(?:player|leg|pick)\s*:\s*(.+)', line, re.I)
+        if named:
+            return named.group(1).strip()[:140] or 'Not explicitly labeled'
+
+    for line in lines:
+        if not ('🎯' in line or re.search(r'\(\s*moneyball\s*\)', line, re.I)):
+            continue
+        # Promo copy may begin with 🎯 and mention a player, but is not a bet leg.
+        if re.search(r'(?i)\b(?:every made|counts as|moneyball\s*(?:promo)?\s*:|free pick|sign up)\b', line):
+            continue
+        if not re.search(r'(?i)\b(?:over|under)\s*\d|(?<!\w)[ou]\d+(?:\.\d+)?\b', line):
+            continue
+        clean = re.sub(r'<a?:\w+:\d+>|:[\w-]+:', ' ', line)
+        clean = re.sub(r'\(\s*moneyball\s*\)', ' ', clean, flags=re.I)
+        clean = clean.replace('🎯', ' ').replace('🍽️', ' ').replace('🍽', ' ')
+        clean = re.sub(r'\s+', ' ', clean).strip(' |:,-')
+        if clean:
+            return clean[:140]
     return 'Not explicitly labeled'
 
 def consume_platform(tokens):

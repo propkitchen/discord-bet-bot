@@ -105,6 +105,8 @@ class CompetitionRegistryTests(unittest.TestCase):
             ("ATP Challenger 2026", "ATP_CHALLENGER"),
             ("Tennis Grand Slams 2026", "GRAND_SLAMS"),
             ("ITF M15 2026", "ITF_M15"),
+            ("ITF M25 2026", "ITF_M25"),
+            ("ATP 250 2026", "ATP_250"),
             ("Billie Jean King Cup 2026", "BILLIE_JEAN_KING_CUP"),
             ("NCAATennis 2026", "NCAA_TENNIS"),
         ):

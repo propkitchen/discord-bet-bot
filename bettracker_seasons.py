@@ -15,10 +15,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 REGISTRY_PATH = Path(__file__).resolve().parent / "config" / "season_registry.json"
 PHASE_ALIASES = {
-    "preseason": ("preseason", "pre season", "spring training"),
+    "preseason": ("preseason", "pre season"),
+    "spring_training": ("spring training", "springtraining"),
     "regular": ("regular season", "regular"),
     "play_in": ("play in", "play-in", "playin"),
-    "playoffs": ("playoffs", "postseason"),
+    "playoffs": ("playoffs", "playoff"),
+    "postseason": ("postseason", "post season"),
     "conference_championships": ("conference championships",),
     "conference_tournaments": ("conference tournaments",),
     "bowls": ("bowl games", "bowls"),
@@ -213,6 +215,13 @@ def parse_season_query(raw: str) -> Optional[SeasonQuery]:
         ids = tuple(c["id"] for c in registry()["competitions"] if c["sport"] == "TENNIS")
     else:
         ids = GROUP_MEMBERS.get(comp["id"], (comp["id"],))
+    # A tour/group view inherits phase types from its actual tournaments.
+    # Do not require the synthetic parent "tour" tag on each member.
+    if comp["id"] in {"TENNIS_ALL", "ATP_TOUR", "WTA_TOUR", "GOLF_MAJORS"}:
+        phases = tuple(sorted({
+            phase for child in registry()["competitions"]
+            if child["id"] in ids for phase in child["phases"]
+        }))
     windows = [w for w in registry()["windows"] if
                w["competition_id"] in ids and w["season_id"] == sid
                and w["phase"] in phases]

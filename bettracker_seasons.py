@@ -40,7 +40,7 @@ GROUP_MEMBERS = {
     "GOLF_MAJORS": ("MASTERS_GOLF", "PGA_CHAMPIONSHIP", "US_OPEN_GOLF", "OPEN_CHAMPIONSHIP"),
 }
 SEASON_PATTERN = re.compile(
-    r"(?<!\d)(?P<first>20\d{2}|\d{2})(?:\s*[-–]\s*(?P<second>20\d{2}|\d{2}))?(?!\d)"
+    r"(?<![A-Za-z0-9])(?P<first>20\d{2}|\d{2})(?:\s*[-–]\s*(?P<second>20\d{2}|\d{2}))?(?![A-Za-z0-9])"
 )
 
 

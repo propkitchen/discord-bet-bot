@@ -1,0 +1,1792 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "window_boundaries": "inclusive",
+    "missing_dates": "unclassified",
+    "source_policy": "verified official schedule only",
+    "multi_membership": "one financial wager; membership via EXISTS, never summed joins",
+    "full_season": "configured phases only; preseason excluded unless explicitly requested"
+  },
+  "competitions": [
+    {
+      "id": "NBA",
+      "sport": "NBA",
+      "season_style": "split",
+      "aliases": [
+        "nba",
+        "national basketball association"
+      ],
+      "phases": [
+        "preseason",
+        "regular",
+        "play_in",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "play_in",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "NBA_CUP",
+      "sport": "NBA",
+      "season_style": "split",
+      "aliases": [
+        "nba cup",
+        "in season tournament",
+        "emirates nba cup"
+      ],
+      "phases": [
+        "group",
+        "knockout",
+        "final"
+      ],
+      "full_phases": [
+        "group",
+        "knockout",
+        "final"
+      ],
+      "secondary_view": true
+    },
+    {
+      "id": "WNBA",
+      "sport": "WNBA",
+      "season_style": "calendar",
+      "aliases": [
+        "wnba",
+        "womens national basketball association"
+      ],
+      "phases": [
+        "preseason",
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "WNBA_COMMISSIONERS_CUP",
+      "sport": "WNBA",
+      "season_style": "calendar",
+      "aliases": [
+        "commissioners cup",
+        "commissioner's cup",
+        "wnba commissioners cup"
+      ],
+      "phases": [
+        "group",
+        "final"
+      ],
+      "full_phases": [
+        "group",
+        "final"
+      ],
+      "secondary_view": true
+    },
+    {
+      "id": "NFL",
+      "sport": "NFL",
+      "season_style": "calendar",
+      "aliases": [
+        "nfl",
+        "national football league"
+      ],
+      "phases": [
+        "preseason",
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "NCAAF",
+      "sport": "NCAAF",
+      "season_style": "calendar",
+      "aliases": [
+        "ncaaf",
+        "cfb",
+        "college football"
+      ],
+      "phases": [
+        "regular",
+        "conference_championships",
+        "bowls",
+        "cfp"
+      ],
+      "full_phases": [
+        "regular",
+        "conference_championships",
+        "bowls",
+        "cfp"
+      ]
+    },
+    {
+      "id": "NCAAB",
+      "sport": "NCAAB",
+      "season_style": "split",
+      "aliases": [
+        "ncaab",
+        "ncaam",
+        "cbb",
+        "mens college basketball",
+        "college basketball"
+      ],
+      "phases": [
+        "regular",
+        "conference_tournaments",
+        "march_madness"
+      ],
+      "full_phases": [
+        "regular",
+        "conference_tournaments",
+        "march_madness"
+      ]
+    },
+    {
+      "id": "NCAAW",
+      "sport": "NCAAW",
+      "season_style": "split",
+      "aliases": [
+        "ncaaw",
+        "wcbb",
+        "womens college basketball",
+        "women's college basketball"
+      ],
+      "phases": [
+        "regular",
+        "conference_tournaments",
+        "march_madness"
+      ],
+      "full_phases": [
+        "regular",
+        "conference_tournaments",
+        "march_madness"
+      ]
+    },
+    {
+      "id": "MLB",
+      "sport": "MLB",
+      "season_style": "calendar",
+      "aliases": [
+        "mlb",
+        "major league baseball"
+      ],
+      "phases": [
+        "spring_training",
+        "regular",
+        "postseason"
+      ],
+      "full_phases": [
+        "regular",
+        "postseason"
+      ]
+    },
+    {
+      "id": "NHL",
+      "sport": "NHL",
+      "season_style": "split",
+      "aliases": [
+        "nhl",
+        "national hockey league"
+      ],
+      "phases": [
+        "preseason",
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "NCAA_TENNIS",
+      "sport": "NCAA_TENNIS",
+      "season_style": "split",
+      "aliases": [
+        "ncaa tennis",
+        "ncaatennis",
+        "college tennis"
+      ],
+      "phases": [
+        "regular",
+        "conference_tournaments",
+        "championships"
+      ],
+      "full_phases": [
+        "regular",
+        "conference_tournaments",
+        "championships"
+      ]
+    },
+    {
+      "id": "EPL",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "epl",
+        "premier league",
+        "english premier league"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "LA_LIGA",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "la liga",
+        "laliga",
+        "spanish la liga"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "SERIE_A",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "serie a",
+        "italian serie a"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "BUNDESLIGA",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "bundesliga",
+        "german bundesliga"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "LIGUE_1",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "ligue 1",
+        "french ligue 1"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "NWSL",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "nwsl",
+        "national women's soccer league"
+      ],
+      "phases": [
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "MLS",
+      "sport": "SOCCER",
+      "season_style": "special",
+      "aliases": [
+        "mls",
+        "major league soccer"
+      ],
+      "phases": [
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "LIGA_MX",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "liga mx"
+      ],
+      "phases": [
+        "apertura",
+        "clausura",
+        "playoffs"
+      ],
+      "full_phases": [
+        "apertura",
+        "clausura",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "UCL",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "ucl",
+        "uefa champions league",
+        "champions league"
+      ],
+      "phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ],
+      "full_phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ]
+    },
+    {
+      "id": "UEL",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "uel",
+        "uefa europa league",
+        "europa league"
+      ],
+      "phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ],
+      "full_phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ]
+    },
+    {
+      "id": "UECL",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "uecl",
+        "uefa conference league",
+        "conference league",
+        "europa conference league"
+      ],
+      "phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ],
+      "full_phases": [
+        "qualifying",
+        "league",
+        "knockout"
+      ]
+    },
+    {
+      "id": "CONCACAF_CHAMPIONS_CUP",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "concacaf champions cup",
+        "concacaf champions league",
+        "ccl"
+      ],
+      "phases": [
+        "qualifying",
+        "knockout"
+      ],
+      "full_phases": [
+        "qualifying",
+        "knockout"
+      ]
+    },
+    {
+      "id": "COPA_LIBERTADORES",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "copa libertadores",
+        "libertadores"
+      ],
+      "phases": [
+        "qualifying",
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "qualifying",
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "FA_CUP",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "fa cup",
+        "english fa cup"
+      ],
+      "phases": [
+        "qualifying",
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "qualifying",
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "COPA_DEL_REY",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "copa del rey",
+        "spanish cup"
+      ],
+      "phases": [
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "CARABAO_CUP",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "carabao cup",
+        "efl cup",
+        "league cup"
+      ],
+      "phases": [
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "DFB_POKAL",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "dfb pokal",
+        "german cup"
+      ],
+      "phases": [
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "COPPA_ITALIA",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "coppa italia"
+      ],
+      "phases": [
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "FIFA_WORLD_CUP",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "mens world cup",
+        "men's world cup",
+        "fifa world cup",
+        "world cup"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "FIFA_WOMENS_WORLD_CUP",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "womens world cup",
+        "women's world cup",
+        "fifa womens world cup",
+        "fifa women's world cup"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "WORLD_CUP_QUALIFIERS",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "world cup qualifiers",
+        "world cup qualifying",
+        "fifa world cup qualifiers",
+        "wc qualifiers"
+      ],
+      "phases": [
+        "qualifying"
+      ],
+      "full_phases": [
+        "qualifying"
+      ]
+    },
+    {
+      "id": "UEFA_EURO",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "euros",
+        "uefa euro",
+        "european championship"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "COPA_AMERICA",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "copa america",
+        "copa américa"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "GOLD_CUP",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "gold cup",
+        "concacaf gold cup"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ]
+    },
+    {
+      "id": "NATIONS_LEAGUE",
+      "sport": "SOCCER",
+      "season_style": "split",
+      "aliases": [
+        "uefa nations league",
+        "nations league"
+      ],
+      "phases": [
+        "league",
+        "knockout"
+      ],
+      "full_phases": [
+        "league",
+        "knockout"
+      ]
+    },
+    {
+      "id": "SOCCER_FRIENDLIES",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "international friendlies",
+        "soccer friendlies",
+        "friendly match",
+        "friendlies"
+      ],
+      "phases": [
+        "friendly"
+      ],
+      "full_phases": [
+        "friendly"
+      ]
+    },
+    {
+      "id": "US_OPEN_CUP",
+      "sport": "SOCCER",
+      "season_style": "calendar",
+      "aliases": [
+        "us open cup",
+        "lamar hunt us open cup"
+      ],
+      "phases": [
+        "rounds",
+        "final"
+      ],
+      "full_phases": [
+        "rounds",
+        "final"
+      ]
+    },
+    {
+      "id": "TENNIS_ALL",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "tennis"
+      ],
+      "phases": [
+        "tour",
+        "tournament"
+      ],
+      "full_phases": [
+        "tour",
+        "tournament"
+      ]
+    },
+    {
+      "id": "ATP_TOUR",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp",
+        "atp tour"
+      ],
+      "phases": [
+        "tour"
+      ],
+      "full_phases": [
+        "tour"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "WTA_TOUR",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta",
+        "wta tour"
+      ],
+      "phases": [
+        "tour"
+      ],
+      "full_phases": [
+        "tour"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "ATP_M1000",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp masters 1000",
+        "masters 1000",
+        "atp 1000"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ATP_500",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp 500"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ATP_250",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp 250"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ATP_FINALS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp finals",
+        "nitto atp finals"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ATP_NEXT_GEN",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "next gen atp finals",
+        "nextgen atp finals"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ATP_CHALLENGER",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "atp challenger",
+        "challenger tour",
+        "challenger"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "WTA_1000",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta 1000"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "WTA_500",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta 500"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "WTA_250",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta 250"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "WTA_125",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta 125"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "WTA_FINALS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wta finals"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_M15",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf m15",
+        "m15"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_M25",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf m25",
+        "m25"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_W15",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf w15",
+        "w15"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_W35",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf w35",
+        "w35"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_W50",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf w50",
+        "w50"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_W75",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf w75",
+        "w75"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "ITF_W100",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "itf w100",
+        "w100"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ]
+    },
+    {
+      "id": "GRAND_SLAMS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "tennis grand slams",
+        "grand slams",
+        "grand slam"
+      ],
+      "phases": [
+        "main_draw"
+      ],
+      "full_phases": [
+        "main_draw"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "AUSTRALIAN_OPEN",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "australian open"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "tier": "GRAND_SLAM"
+    },
+    {
+      "id": "ROLAND_GARROS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "roland garros",
+        "french open"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "tier": "GRAND_SLAM"
+    },
+    {
+      "id": "WIMBLEDON",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "wimbledon"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "tier": "GRAND_SLAM"
+    },
+    {
+      "id": "US_OPEN_TENNIS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "us open tennis",
+        "tennis us open"
+      ],
+      "phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "full_phases": [
+        "qualifying",
+        "main_draw"
+      ],
+      "tier": "GRAND_SLAM"
+    },
+    {
+      "id": "DAVIS_CUP",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "davis cup"
+      ],
+      "phases": [
+        "qualifying",
+        "finals"
+      ],
+      "full_phases": [
+        "qualifying",
+        "finals"
+      ],
+      "team_event": true
+    },
+    {
+      "id": "BILLIE_JEAN_KING_CUP",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "billie jean king cup",
+        "bjk cup"
+      ],
+      "phases": [
+        "qualifying",
+        "finals"
+      ],
+      "full_phases": [
+        "qualifying",
+        "finals"
+      ],
+      "team_event": true
+    },
+    {
+      "id": "UNITED_CUP",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "united cup"
+      ],
+      "phases": [
+        "group",
+        "knockout"
+      ],
+      "full_phases": [
+        "group",
+        "knockout"
+      ],
+      "team_event": true
+    },
+    {
+      "id": "LAVER_CUP",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "laver cup"
+      ],
+      "phases": [
+        "team_event"
+      ],
+      "full_phases": [
+        "team_event"
+      ],
+      "team_event": true
+    },
+    {
+      "id": "OLYMPIC_TENNIS",
+      "sport": "TENNIS",
+      "season_style": "calendar",
+      "aliases": [
+        "olympic tennis",
+        "tennis olympics"
+      ],
+      "phases": [
+        "main_draw"
+      ],
+      "full_phases": [
+        "main_draw"
+      ],
+      "team_event": true
+    },
+    {
+      "id": "PGA_TOUR",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "pga tour",
+        "pga"
+      ],
+      "phases": [
+        "regular",
+        "playoffs"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs"
+      ]
+    },
+    {
+      "id": "LIV_GOLF",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "liv golf",
+        "liv"
+      ],
+      "phases": [
+        "regular",
+        "team_championship"
+      ],
+      "full_phases": [
+        "regular",
+        "team_championship"
+      ]
+    },
+    {
+      "id": "DP_WORLD_TOUR",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "dp world tour",
+        "european tour"
+      ],
+      "phases": [
+        "regular",
+        "finals"
+      ],
+      "full_phases": [
+        "regular",
+        "finals"
+      ]
+    },
+    {
+      "id": "LPGA",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "lpga",
+        "lpga tour"
+      ],
+      "phases": [
+        "regular"
+      ],
+      "full_phases": [
+        "regular"
+      ]
+    },
+    {
+      "id": "GOLF_MAJORS",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "golf majors",
+        "golf major championships",
+        "major golf"
+      ],
+      "phases": [
+        "tournament"
+      ],
+      "full_phases": [
+        "tournament"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "MASTERS_GOLF",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "masters tournament",
+        "golf masters"
+      ],
+      "phases": [
+        "tournament"
+      ],
+      "full_phases": [
+        "tournament"
+      ]
+    },
+    {
+      "id": "PGA_CHAMPIONSHIP",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "pga championship"
+      ],
+      "phases": [
+        "tournament"
+      ],
+      "full_phases": [
+        "tournament"
+      ]
+    },
+    {
+      "id": "US_OPEN_GOLF",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "us open golf"
+      ],
+      "phases": [
+        "tournament"
+      ],
+      "full_phases": [
+        "tournament"
+      ]
+    },
+    {
+      "id": "OPEN_CHAMPIONSHIP",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "open championship",
+        "british open golf"
+      ],
+      "phases": [
+        "tournament"
+      ],
+      "full_phases": [
+        "tournament"
+      ]
+    },
+    {
+      "id": "UFC",
+      "sport": "UFC",
+      "season_style": "calendar",
+      "aliases": [
+        "ufc",
+        "ultimate fighting championship"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "PFL",
+      "sport": "MMA",
+      "season_style": "calendar",
+      "aliases": [
+        "pfl",
+        "professional fighters league"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "ONE_CHAMPIONSHIP",
+      "sport": "MMA",
+      "season_style": "calendar",
+      "aliases": [
+        "one championship"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "BELLATOR",
+      "sport": "MMA",
+      "season_style": "calendar",
+      "aliases": [
+        "bellator"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "MMA_OTHER",
+      "sport": "MMA",
+      "season_style": "calendar",
+      "aliases": [
+        "mma",
+        "mixed martial arts"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "BOXING",
+      "sport": "BOXING",
+      "season_style": "calendar",
+      "aliases": [
+        "boxing"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "F1",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "f1",
+        "formula 1",
+        "formula one"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "NASCAR_CUP",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "nascar cup",
+        "nascar"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "INDYCAR",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "indycar"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "MOTOGP",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "motogp"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "WRC",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "wrc",
+        "world rally championship"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "CS2",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "cs2",
+        "counter strike 2",
+        "counter-strike 2"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "VALORANT",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "valorant",
+        "vct"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "DOTA2",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "dota2",
+        "dota 2"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "LEAGUE_OF_LEGENDS",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "league of legends",
+        "lol esports"
+      ],
+      "phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ],
+      "full_phases": [
+        "regular",
+        "playoffs",
+        "event"
+      ]
+    },
+    {
+      "id": "ESPORTS_ALL",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "esports",
+        "e sports",
+        "e-sports"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "MOTORSPORTS_ALL",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "motorsports",
+        "motor racing"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "GOLF_ALL",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "golf"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
+    }
+  ],
+  "windows": [
+    {
+      "competition_id": "NBA",
+      "season_id": "2026-27",
+      "phase": "regular",
+      "start_date": "2026-10-20",
+      "end_date": "2027-04-11",
+      "status": "verified",
+      "source_url": "https://pr.nba.com/2026-27-nba-regular-season-schedule/"
+    },
+    {
+      "competition_id": "NBA",
+      "season_id": "2026-27",
+      "phase": "play_in",
+      "start_date": "2027-04-13",
+      "end_date": "2027-04-16",
+      "status": "verified",
+      "source_url": "https://www.nba.com/news/key-dates"
+    },
+    {
+      "competition_id": "NBA",
+      "season_id": "2026-27",
+      "phase": "playoffs",
+      "start_date": "2027-04-17",
+      "end_date": null,
+      "status": "start_verified",
+      "source_url": "https://www.nba.com/news/key-dates"
+    },
+    {
+      "competition_id": "NFL",
+      "season_id": "2026",
+      "phase": "regular",
+      "start_date": "2026-09-09",
+      "end_date": "2027-01-10",
+      "status": "verified",
+      "source_url": "https://media.nfl.com/football-information/2026/news/2026-nfl-schedule-announced"
+    },
+    {
+      "competition_id": "NFL",
+      "season_id": "2026",
+      "phase": "playoffs",
+      "start_date": "2027-01-16",
+      "end_date": "2027-02-14",
+      "status": "verified",
+      "source_url": "https://media.nfl.com/football-information/2026/news/2026-nfl-schedule-announced"
+    },
+    {
+      "competition_id": "MLS",
+      "season_id": "2027-sprint",
+      "phase": "regular",
+      "start_date": "2027-02-19",
+      "end_date": "2027-05-08",
+      "status": "verified",
+      "source_url": "https://www.mlssoccer.com/news/major-league-soccer-announces-2027-sprint-season-schedule"
+    },
+    {
+      "competition_id": "UCL",
+      "season_id": "2026-27",
+      "phase": "league",
+      "start_date": "2026-09-08",
+      "end_date": "2027-01-27",
+      "status": "verified",
+      "source_url": "https://www.uefa.com/uefachampionsleague/news/02a6-20d57cfcd03e-407c22a7f465-1000--2026-27-champions-league-teams-draws-format-final/"
+    },
+    {
+      "competition_id": "UCL",
+      "season_id": "2026-27",
+      "phase": "knockout",
+      "start_date": "2027-02-16",
+      "end_date": "2027-06-05",
+      "status": "verified",
+      "source_url": "https://www.uefa.com/uefachampionsleague/news/02a6-20d57cfcd03e-407c22a7f465-1000--2026-27-champions-league-teams-draws-format-final/"
+    },
+    {
+      "competition_id": "WIMBLEDON",
+      "season_id": "2026",
+      "phase": "main_draw",
+      "start_date": "2026-06-29",
+      "end_date": "2026-07-12",
+      "status": "verified",
+      "source_url": "https://www.atptour.com/en/news/what-is-the-2026-atp-tour-calendar/"
+    },
+    {
+      "competition_id": "FIFA_WORLD_CUP",
+      "season_id": "2026",
+      "phase": "all",
+      "start_date": "2026-06-11",
+      "end_date": "2026-07-19",
+      "status": "verified",
+      "source_url": "https://www.fifa.com/en/tournaments/mens/worldcup/canadamexicousa2026/articles/fifa-world-cup-26-match-schedule-revealed"
+    },
+    {
+      "competition_id": "FIFA_WOMENS_WORLD_CUP",
+      "season_id": "2027",
+      "phase": "all",
+      "start_date": "2027-06-24",
+      "end_date": "2027-07-25",
+      "status": "verified",
+      "source_url": "https://www.fifa.com/en/tournaments/womens/womensworldcup/brazil-2027/articles/everything-you-need-to-know"
+    }
+  ]
+}

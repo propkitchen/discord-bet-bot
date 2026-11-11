@@ -211,13 +211,18 @@ def parse_season_query(raw: str) -> Optional[SeasonQuery]:
         return None
     phases = tuple(comp["full_phases"] if phase == "full" else
                    comp["phases"] if phase == "all" else (phase,))
-    if comp["id"] == "TENNIS_ALL":
-        ids = tuple(c["id"] for c in registry()["competitions"] if c["sport"] == "TENNIS")
+    aggregate_sports = {
+        "TENNIS_ALL": "TENNIS", "GOLF_ALL": "GOLF",
+        "ESPORTS_ALL": "ESPORTS", "MOTORSPORTS_ALL": "MOTORSPORTS",
+    }
+    if comp["id"] in aggregate_sports:
+        ids = tuple(c["id"] for c in registry()["competitions"]
+                    if c["sport"] == aggregate_sports[comp["id"]])
     else:
         ids = GROUP_MEMBERS.get(comp["id"], (comp["id"],))
     # A tour/group view inherits phase types from its actual tournaments.
     # Do not require the synthetic parent "tour" tag on each member.
-    if comp["id"] in {"TENNIS_ALL", "ATP_TOUR", "WTA_TOUR", "GOLF_MAJORS"}:
+    if comp["id"] in {*aggregate_sports, "ATP_TOUR", "WTA_TOUR", "GOLF_MAJORS"}:
         phases = tuple(sorted({
             phase for child in registry()["competitions"]
             if child["id"] in ids for phase in child["phases"]

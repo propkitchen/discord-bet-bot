@@ -1721,6 +1721,24 @@
       "end_date": "2026-07-12",
       "status": "verified",
       "source_url": "https://www.atptour.com/en/news/what-is-the-2026-atp-tour-calendar/"
+    },
+    {
+      "competition_id": "FIFA_WORLD_CUP",
+      "season_id": "2026",
+      "phase": "all",
+      "start_date": "2026-06-11",
+      "end_date": "2026-07-19",
+      "status": "verified",
+      "source_url": "https://www.fifa.com/en/tournaments/mens/worldcup/canadamexicousa2026/articles/fifa-world-cup-26-match-schedule-revealed"
+    },
+    {
+      "competition_id": "FIFA_WOMENS_WORLD_CUP",
+      "season_id": "2027",
+      "phase": "all",
+      "start_date": "2027-06-24",
+      "end_date": "2027-07-25",
+      "status": "verified",
+      "source_url": "https://www.fifa.com/en/tournaments/womens/womensworldcup/brazil-2027/articles/everything-you-need-to-know"
     }
   ]
 }

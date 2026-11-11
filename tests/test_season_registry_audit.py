@@ -120,6 +120,10 @@ class CompetitionRegistryTests(unittest.TestCase):
         self.assertIn("ATP_CHALLENGER", all_tennis.competition_ids)
         self.assertIn("ITF_M25", all_tennis.competition_ids)
         self.assertIn("WIMBLEDON", all_tennis.competition_ids)
+        self.assertEqual("2025-26", parse_season_query(
+            "NCAA Tennis 2025-26").season_id)
+        self.assertEqual("2026-27", parse_season_query(
+            "NCAATennis 2026").season_id)
 
     def test_other_sports_and_conservative_legacy_paths(self):
         self.assertEqual("spring_training", parse_season_query(

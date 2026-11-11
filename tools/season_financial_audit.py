@@ -46,7 +46,9 @@ def normalized_category(b: Dict[str, Any]) -> str:
 
 def exact_totals(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     rows = list(rows)
-    risk = sum((amount(r["risk_units"]) for r in rows), Decimal("0"))
+    # Match the existing bot's fetch_filtered_totals: void risk is excluded.
+    risk = sum((amount(r["risk_units"]) for r in rows
+                if str(r.get("result") or "").lower() != "void"), Decimal("0"))
     net = sum((amount(r["net_units"]) for r in rows), Decimal("0"))
     results = {key: sum(str(r.get("result", "")).lower() == key for r in rows)
                for key in ("win", "loss", "push", "void")}
@@ -111,16 +113,20 @@ def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
     fingerprints: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
     bucket_maps: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
         k: defaultdict(list) for k in
-        ("by_capper", "by_sport", "by_month_posted", "by_category", "by_platform",
-         "by_source_evidence")
+        ("by_capper", "by_sport", "by_month_posted", "by_month_legacy_bet_date",
+         "by_month_graded", "by_category", "by_platform", "by_source_evidence")
     }
     for row in selected:
         risk, net = amount(row.get("risk_units")), amount(row.get("net_units"))
         cat = normalized_category(row)
         bucket_maps["by_capper"][str(row.get("capper") or "UNKNOWN")].append(row)
         bucket_maps["by_sport"][str(row.get("sport") or "UNKNOWN").upper()].append(row)
-        posted_month = str(row.get("bet_date") or row.get("created_utc") or "UNKNOWN")[:7]
+        posted_month = str(row.get("created_utc") or "UNKNOWN")[:7]
+        legacy_month = str(row.get("bet_date") or "UNKNOWN")[:7]
+        graded_month = str(row.get("graded_utc") or "UNKNOWN")[:7]
         bucket_maps["by_month_posted"][posted_month].append(row)
+        bucket_maps["by_month_legacy_bet_date"][legacy_month].append(row)
+        bucket_maps["by_month_graded"][graded_month].append(row)
         bucket_maps["by_category"][cat].append(row)
         bucket_maps["by_platform"][str(row.get("platform") or "UNKNOWN")].append(row)
         # Source provenance is absent from the current schema. A valid Discord
@@ -159,7 +165,7 @@ def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
                        f"Multiple sports explicitly mentioned: {sorted(explicit)}")
         key = (
             row.get("guild_id"), str(row.get("capper") or "").casefold(),
-            str(row.get("bet_date") or row.get("created_utc") or "")[:10],
+            str(row.get("created_utc") or "")[:10],
             re.sub(r"\s+", " ", str(row.get("content") or "")).strip().casefold(),
             str(risk), str(row.get("odds_text") or ""),
         )
@@ -173,7 +179,7 @@ def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
     return {
         "status": "audit_only_no_changes",
         "source_provenance_note": "Historical import origin cannot be proved from current bets table",
-        "period_note": "by_month_posted uses bet_date/created_utc, NOT verified event date",
+        "period_note": "by_month_posted uses created_utc; legacy bet_date can come from explicit game date or grading-time fallback; event dates are unverified",
         "scope": {"capper": capper, "guild_id": guild_id},
         "signature": signature(selected),
         "totals": exact_totals(selected),

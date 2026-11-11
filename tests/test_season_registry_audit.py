@@ -255,6 +255,19 @@ class FinancialAuditTests(unittest.TestCase):
         self.assertEqual(saved, json.dumps(rows, sort_keys=True))
         self.assertEqual(before, signature(rows))
 
+    def test_void_stakes_are_excluded_like_existing_bot_and_sport_scope(self):
+        rows = [
+            row(31, 0.91, risk=1, result="win"),
+            row(32, 0, risk=100, result="void"),
+            row(33, 2, risk=5, result="win", sport="NFL"),
+        ]
+        result = analyze_rows(rows, capper="PropKitchen", sport="NBA")
+        self.assertEqual(2, result["totals"]["bets"])
+        self.assertEqual("1", result["totals"]["risk_units"])
+        self.assertEqual("0.91", result["totals"]["net_units"])
+        self.assertEqual("91.0000", result["totals"]["roi_percent"])
+        self.assertEqual(1, result["totals"]["voids"])
+
     def test_duplicate_and_cross_sport_are_flagged_without_changes(self):
         a = row(11, 1, content="NFL Patrick Mahomes 2+ TD", sport="NBA")
         b = row(12, 1, content="NFL Patrick Mahomes 2+ TD", sport="NBA")

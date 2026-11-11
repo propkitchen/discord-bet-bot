@@ -128,6 +128,10 @@ class CompetitionRegistryTests(unittest.TestCase):
         self.assertEqual("NHL", parse_season_query("26-27 NHL Preseason").sport)
         self.assertEqual("F1", parse_season_query("2026 Formula 1").competition_id)
         self.assertEqual("VALORANT", parse_season_query("Valorant 2026").competition_id)
+        self.assertEqual("ESPORTS_ALL", parse_season_query("Esports 2026").competition_id)
+        self.assertIn("VALORANT", parse_season_query("Esports 2026").competition_ids)
+        self.assertEqual("MOTORSPORTS_ALL", parse_season_query("Motorsports 2026").competition_id)
+        self.assertEqual("GOLF_ALL", parse_season_query("Golf 2026").competition_id)
         for legacy in ("yesterday", "last 14 days", "2026-07", "2026-07-09",
                        "NBA yesterday", "July 2026"):
             self.assertIsNone(parse_season_query(legacy), legacy)

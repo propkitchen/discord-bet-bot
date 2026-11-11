@@ -1638,6 +1638,54 @@
         "playoffs",
         "event"
       ]
+    },
+    {
+      "id": "ESPORTS_ALL",
+      "sport": "ESPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "esports",
+        "e sports",
+        "e-sports"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "MOTORSPORTS_ALL",
+      "sport": "MOTORSPORTS",
+      "season_style": "calendar",
+      "aliases": [
+        "motorsports",
+        "motor racing"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
+    },
+    {
+      "id": "GOLF_ALL",
+      "sport": "GOLF",
+      "season_style": "calendar",
+      "aliases": [
+        "golf"
+      ],
+      "phases": [
+        "event"
+      ],
+      "full_phases": [
+        "event"
+      ],
+      "group_view": true
     }
   ],
   "windows": [

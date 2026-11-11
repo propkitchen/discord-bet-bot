@@ -225,16 +225,26 @@ def parse_season_query(raw: str) -> Optional[SeasonQuery]:
     windows = [w for w in registry()["windows"] if
                w["competition_id"] in ids and w["season_id"] == sid
                and w["phase"] in phases]
-    start = min((date.fromisoformat(w["start_date"]) for w in windows
+    # FIFA publishes complete tournament boundaries but not every group /
+    # knockout phase in this registry. An explicit all-phase window is valid
+    # for displaying the tournament span, not for guessing match phases.
+    overall = [w for w in registry()["windows"] if
+               w["competition_id"] in ids and w["season_id"] == sid
+               and w["phase"] == "all"] if phase in {"full", "all"} else []
+    available = windows + overall
+    start = min((date.fromisoformat(w["start_date"]) for w in available
                  if w.get("start_date")), default=None)
-    complete = bool(windows and len(windows) >= len(phases)
-                    and all(w["status"] == "verified" for w in windows)
-                    and all(w.get("end_date") for w in windows))
-    end = max((date.fromisoformat(w["end_date"]) for w in windows),
-              default=None) if complete else None
+    complete = bool(
+        (windows and len(windows) >= len(phases)
+         and all(w["status"] == "verified" and w.get("end_date") for w in windows))
+        or (overall and all(w["status"] == "verified" and w.get("end_date")
+                            for w in overall))
+    )
+    end = max((date.fromisoformat(w["end_date"]) for w in available
+               if w.get("end_date")), default=None) if complete else None
     return SeasonQuery(
         comp["sport"], comp["id"], sid, phase, phases, ids, start, end,
-        complete, tuple(sorted({w["source_url"] for w in windows})),
+        complete, tuple(sorted({w["source_url"] for w in available})),
         breakdown,
     )
 

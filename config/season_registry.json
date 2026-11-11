@@ -208,7 +208,7 @@
     {
       "id": "NCAA_TENNIS",
       "sport": "NCAA_TENNIS",
-      "season_style": "calendar",
+      "season_style": "split",
       "aliases": [
         "ncaa tennis",
         "ncaatennis",

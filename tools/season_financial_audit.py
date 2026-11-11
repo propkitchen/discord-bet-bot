@@ -104,11 +104,13 @@ def _payout_expectation(row: Dict[str, Any]) -> Optional[Decimal]:
 
 
 def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
-                 guild_id: Optional[int] = None) -> Dict[str, Any]:
+                 guild_id: Optional[int] = None,
+                 sport: Optional[str] = None) -> Dict[str, Any]:
     """Reports suspicious records but NEVER fixes or excludes them silently."""
     selected = [r for r in rows
                 if (capper is None or str(r.get("capper", "")).casefold() == capper.casefold())
-                and (guild_id is None or int(r.get("guild_id") or 0) == guild_id)]
+                and (guild_id is None or int(r.get("guild_id") or 0) == guild_id)
+                and (sport is None or str(r.get("sport") or "").upper() == sport.upper())]
     issues: List[Dict[str, Any]] = []
     fingerprints: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
     bucket_maps: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
@@ -180,7 +182,7 @@ def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
         "status": "audit_only_no_changes",
         "source_provenance_note": "Historical import origin cannot be proved from current bets table",
         "period_note": "by_month_posted uses created_utc; legacy bet_date can come from explicit game date or grading-time fallback; event dates are unverified",
-        "scope": {"capper": capper, "guild_id": guild_id},
+        "scope": {"capper": capper, "guild_id": guild_id, "sport": sport},
         "signature": signature(selected),
         "totals": exact_totals(selected),
         "breakdown": {
@@ -197,7 +199,8 @@ def analyze_rows(rows: List[Dict[str, Any]], capper: Optional[str] = None,
 
 
 def audit_database(path: Path, capper: Optional[str] = None,
-                   guild_id: Optional[int] = None) -> Dict[str, Any]:
+                   guild_id: Optional[int] = None,
+                   sport: Optional[str] = None) -> Dict[str, Any]:
     db = path.resolve()
     if not db.is_file():
         raise FileNotFoundError(db)
@@ -207,7 +210,7 @@ def audit_database(path: Path, capper: Optional[str] = None,
         con.execute("PRAGMA query_only=ON")
         # SQLite immutable backup only, not active /var/data/bets.db.
         rows = [dict(row) for row in con.execute("SELECT * FROM bets ORDER BY guild_id,message_id")]
-        output = analyze_rows(rows, capper, guild_id)
+        output = analyze_rows(rows, capper, guild_id, sport)
         output["sqlite_integrity_check"] = con.execute("PRAGMA quick_check").fetchone()[0]
     return output
 
@@ -218,11 +221,12 @@ def main() -> None:
                      help="Verified disposable SQLite COPY, not production")
     cli.add_argument("--capper", help="Optional case-insensitive capper filter")
     cli.add_argument("--guild-id", type=int)
+    cli.add_argument("--sport", help="Optional exact sport: NBA, TENNIS, etc.")
     cli.add_argument("--output", type=Path, help="Save full audit JSON including wager IDs")
     cli.add_argument("--compare-baseline", type=Path,
                      help="Previously saved JSON audit on the SAME snapshot")
     args = cli.parse_args()
-    report = audit_database(args.database, args.capper, args.guild_id)
+    report = audit_database(args.database, args.capper, args.guild_id, args.sport)
     if args.compare_baseline:
         baseline = json.loads(args.compare_baseline.read_text(encoding="utf-8"))
         report["baseline_reconciled"] = report["signature"] == baseline.get("signature")

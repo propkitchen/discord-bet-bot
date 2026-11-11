@@ -137,7 +137,13 @@ class CompetitionRegistryTests(unittest.TestCase):
 
     def test_future_calendar_not_silently_fabricated(self):
         self.assertIsNone(parse_season_query("2027 MLB").date_start)
-        self.assertIsNone(parse_season_query("2027 Womens World Cup").date_end)
+        worldcup = parse_season_query("2026 World Cup")
+        self.assertEqual(date(2026, 6, 11), worldcup.date_start)
+        self.assertEqual(date(2026, 7, 19), worldcup.date_end)
+        womens = parse_season_query("2027 Womens World Cup")
+        self.assertEqual(date(2027, 6, 24), womens.date_start)
+        self.assertEqual(date(2027, 7, 25), womens.date_end)
+        self.assertIsNone(parse_season_query("2027 World Cup Qualifiers").date_start)
         self.assertIsNone(parse_season_query("2027 NHL 2027-28"))
         for window in registry()["windows"]:
             self.assertTrue(window["source_url"].startswith("https://"))

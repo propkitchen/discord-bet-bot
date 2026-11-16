@@ -1810,8 +1810,13 @@ def compact_bet_description(content: str, market: str, max_len: int = 95) -> str
         r"(?i)\b(?:over|under)\s*(?:\d|\.)"
         r"|(?<![A-Za-z])(?:o|u)\d+(?:\.\d+)?\b"
         r"|\b(?:moneyline|spread|anytime|to record|double.double)\b"
-        r"|\b\d+(?:\.\d+)?\+\s*(?:points?|pts?|rebounds?|rebs?|"
-        r"assists?|asts?|receptions?|yards?|sog|shots?)\b"
+        # Alternate thresholds like '250+ Passing Yards' and '20+ Rushing Yards'
+        # are wager selections, not sportsbook metadata. Accept a compound
+        # market but do not mistake a bare '250+' for an independently priced bet.
+        r"|\b\d+(?:\.\d+)?\+\s*(?:(?:passing|rushing|receiving|pass|rush|rec)\s+"
+        r"(?:yards?|yds?|touchdowns?|tds?|attempts?|completions?)|"
+        r"(?:points?|pts?|rebounds?|rebs?|assists?|asts?|receptions?|"
+        r"yards?|yds?|sog|shots?|tackles?))\b"
     )
     if not re.search(prop_pattern, description):
         lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]

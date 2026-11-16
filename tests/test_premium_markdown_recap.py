@@ -78,6 +78,56 @@ class PremiumFormatTests(unittest.TestCase):
         self.assertNotIn("DraftKings", report)
         self.assertNotIn("*", report)
 
+    def test_jordan_love_alternate_passing_yards_not_bookmaker(self):
+        # Real-world Discord format: selection above a separate stake line.
+        content = (
+            "NFL Sunday Prop #1 🏈 (11/15)\n\n"
+            "🏈 Jordan Love 250+ Passing Yards\n\n"
+            "Collab w/ @TheeGr8 🤝\n\n"
+            "1.25u | -123 DraftKings\n\n"
+            "Love has exceeded 250 passing yards in six games."
+        )
+        description = self.parser["compact_bet_description"](content, "")
+        self.assertEqual("Jordan Love 250+ Pass Yds", description)
+        self.assertNotIn("DraftKings", description)
+
+    def test_brock_purdy_alternate_rushing_yards_not_bookmaker(self):
+        content = (
+            "NFL Sunday Prop #2 🏈 (11/15)\n\n"
+            "Brock Purdy 20+ Rushing Yards\n\n"
+            "1u | -110 DraftKings\n\n"
+            "Purdy has reached 20 rushing yards repeatedly."
+        )
+        description = self.parser["compact_bet_description"](content, "")
+        self.assertEqual("Brock Purdy 20+ Rush Yds", description)
+        self.assertNotIn("DraftKings", description)
+
+    def test_alternate_receiving_yards_and_abbreviated_markets(self):
+        examples = (
+            ("CeeDee Lamb 35+ Receiving Yards", "CeeDee Lamb 35+ Rec Yds"),
+            ("Jordan Love 250+ Pass Yds", "Jordan Love 250+ Pass Yds"),
+            ("Brock Purdy 20+ Rush Yds", "Brock Purdy 20+ Rush Yds"),
+        )
+        for selection, expected in examples:
+            with self.subTest(selection=selection):
+                content = f"NFL Sunday Prop\n{selection}\n1u | -115 DraftKings"
+                self.assertEqual(
+                    expected, self.parser["compact_bet_description"](content, "")
+                )
+
+    def test_existing_over_under_formats_remain_intact(self):
+        examples = (
+            ("Cameron Boozer OVER 14.5 Rebounds+Assists", "Cameron Boozer o14.5 Reb+Ast"),
+            ("Dylan Harper UNDER 16.5 Points", "Dylan Harper u16.5 Pts"),
+            ("Jaylen Warren o19.5 Receiving Yards", "Jaylen Warren o19.5 Rec Yds"),
+        )
+        for selection, expected in examples:
+            with self.subTest(selection=selection):
+                content = f"NBA Prop #1\n{selection}\n1u | -111 DraftKings"
+                self.assertEqual(
+                    expected, self.parser["compact_bet_description"](content, "")
+                )
+
     def test_same_line_wager_still_wins_over_heading(self):
         content = (
             "## NBA Prop #3\n"

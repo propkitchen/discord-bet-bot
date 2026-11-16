@@ -81,10 +81,10 @@ class PremiumFormatTests(unittest.TestCase):
     def test_jordan_love_alternate_passing_yards_not_bookmaker(self):
         # Real-world Discord format: selection above a separate stake line.
         content = (
-            "NFL Sunday Prop #1 🏈 (11/15)\\n\\n"
-            "🏈 Jordan Love 250+ Passing Yards\\n\\n"
-            "Collab w/ @TheeGr8 🤝\\n\\n"
-            "1.25u | -123 DraftKings\\n\\n"
+            "NFL Sunday Prop #1 🏈 (11/15)\n\n"
+            "🏈 Jordan Love 250+ Passing Yards\n\n"
+            "Collab w/ @TheeGr8 🤝\n\n"
+            "1.25u | -123 DraftKings\n\n"
             "Love has exceeded 250 passing yards in six games."
         )
         description = self.parser["compact_bet_description"](content, "")
@@ -93,9 +93,9 @@ class PremiumFormatTests(unittest.TestCase):
 
     def test_brock_purdy_alternate_rushing_yards_not_bookmaker(self):
         content = (
-            "NFL Sunday Prop #2 🏈 (11/15)\\n\\n"
-            "Brock Purdy 20+ Rushing Yards\\n\\n"
-            "1u | -110 DraftKings\\n\\n"
+            "NFL Sunday Prop #2 🏈 (11/15)\n\n"
+            "Brock Purdy 20+ Rushing Yards\n\n"
+            "1u | -110 DraftKings\n\n"
             "Purdy has reached 20 rushing yards repeatedly."
         )
         description = self.parser["compact_bet_description"](content, "")
@@ -110,7 +110,7 @@ class PremiumFormatTests(unittest.TestCase):
         )
         for selection, expected in examples:
             with self.subTest(selection=selection):
-                content = f"NFL Sunday Prop\\n{selection}\\n1u | -115 DraftKings"
+                content = f"NFL Sunday Prop\n{selection}\n1u | -115 DraftKings"
                 self.assertEqual(
                     expected, self.parser["compact_bet_description"](content, "")
                 )
@@ -123,7 +123,7 @@ class PremiumFormatTests(unittest.TestCase):
         )
         for selection, expected in examples:
             with self.subTest(selection=selection):
-                content = f"NBA Prop #1\\n{selection}\\n1u | -111 DraftKings"
+                content = f"NBA Prop #1\n{selection}\n1u | -111 DraftKings"
                 self.assertEqual(
                     expected, self.parser["compact_bet_description"](content, "")
                 )
